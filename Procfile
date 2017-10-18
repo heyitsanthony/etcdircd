@@ -1,0 +1,3 @@
+etcd: etcd --listen-client-urls https://localhost:2379 --advertise-client-urls https://localhost:2379 --listen-peer-urls https://localhost:2380 --trusted-ca-file hack/tls/certs/etcdclient/ca.pem --cert-file hack/tls/certs/etcdclient/server1.pem --key-file hack/tls/certs/etcdclient/server1-key.pem --peer-trusted-ca-file hack/tls/certs/etcdclient/ca.pem --peer-cert-file hack/tls/certs/etcdclient/server1.pem --peer-key-file hack/tls/certs/etcdclient/server1-key.pem
+
+etcdircd: ./etcdircd -v=9 -logtostderr=true -listen localhost:6667 -etcdircd-yaml cmd/etcdircd/etcdircd.conf.yml -etcdclient-yaml cmd/etcdircd/etcdclient.conf.yml

@@ -1,0 +1,2 @@
+endpoints: ['https://localhost:2379']
+ca-file: 'hack/tls/certs/etcdclient/ca.pem'

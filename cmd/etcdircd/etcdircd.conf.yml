@@ -1,0 +1,16 @@
+NetworkName: 'demoNET'
+HostName: 'demoHOST'
+
+EtcdPrefix: '/irc/'
+
+# Keys for data stored in etcd
+EtcdCryptoKeyFile: 'hack/tls/certs/etcdcrypto/server1-key.pem'
+EtcdCryptoCertFile: 'hack/tls/certs/etcdcrypto/server1.pem'
+EtcdCryptoCAFile: 'hack/tls/certs/etcdcrypto/ca.pem'
+
+# Keys for serving clients
+IrcdKeyFile: 'hack/tls/certs/ircd/server1-key.pem'
+IrcdCertFile: 'hack/tls/certs/ircd/server1.pem'
+IrcdCAFile: 'hack/tls/certs/ircd/ca.pem'
+
+IrcdClientCerts: false

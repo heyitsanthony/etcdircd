@@ -1,0 +1,14 @@
+package: github.com/heyitsanthony/etcdircd
+import:
+- package: github.com/coreos/etcd
+  version: v3.2.8
+  subpackages:
+  - clientv3
+- package: google.golang.org/grpc
+  version: v1.2.1
+- package: gopkg.in/sorcix/irc.v2
+  version: 1b25be7f891d1bd0190ac0ef159da153c9ffa22a
+- package: github.com/heyitsanthony/etcdcrypto
+  version: 6ec38d9a34f28644c9109886b17266d8fdac41a6
+- package: github.com/spf13/cobra
+  version: 7b2c5ac9fc04fc5efafb60700713d4fa609b777b
