@@ -190,6 +190,24 @@ func (ec *etcdClient) sendHostMsg(cmd string, params ...string) error {
 }
 
 func (ec *etcdClient) Join(ch string) error {
+	chs := strings.Split(ch, ",")
+	errc := make(chan error, len(chs))
+	var wg sync.WaitGroup
+	wg.Add(len(chs))
+	for i := range chs {
+		go func(ch string) {
+			defer wg.Done()
+			if err := ec.join(ch); err != nil {
+				errc <- err
+			}
+		}(chs[i])
+	}
+	wg.Wait()
+	close(errc)
+	return <-errc
+}
+
+func (ec *etcdClient) join(ch string) error {
 	if !isChan(ch) {
 		return ec.sendHostMsg(irc.ERR_NOSUCHCHANNEL, ch, "No such channel")
 	}

@@ -65,7 +65,14 @@ func TestJoin(t *testing.T) {
 	testExpectMsg(t, cn, "No topic")
 	testExpectMsg(t, cn, "End of NAMES")
 
-	// List names in the channel.
+	// Join multiple channels at once.
+	cn.Send(context.TODO(), "JOIN", "#chan1,#chan2")
+	// Response may be interleaved, so can't check chan1/chan2 in order;
+	// but the command should trigger exactly two NAMES responses.
+	testExpectMsg(t, cn, "End of NAMES")
+	testExpectMsg(t, cn, "End of NAMES")
+
+	// List names in the channel #mychan.
 	cn2 := s.client(t, "n2")
 	defer cn2.Close()
 	cn2.Send(context.TODO(), "JOIN", "#mychan")
