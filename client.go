@@ -56,7 +56,11 @@ func ClientDo(c Client, msg *irc.Message) error {
 	case irc.PING:
 		return c.Ping(msg.Params[0])
 	case irc.PART:
-		return c.Part(msg.Params[0], msg.Params[1])
+		partMsg := ""
+		if len(msg.Params) > 1 {
+			partMsg = msg.Params[1]
+		}
+		return c.Part(msg.Params[0], partMsg)
 	case irc.QUIT:
 		return c.Quit(msg.Params[0])
 	case irc.PRIVMSG:

@@ -272,6 +272,22 @@ func expectSilence(c *Conn) bool {
 	}
 }
 
+// TestPartNoMsg checks that parting with no message works.
+func TestPartNoMsg(t *testing.T) {
+	s := newIRCServer(t)
+	defer s.Close()
+
+	cn := s.client(t, "n1")
+	defer cn.Close()
+	cn.Send(context.TODO(), "JOIN", "#mychan")
+
+	cn.Send(context.TODO(), "PART", "#mychan")
+	testExpectMsg(t, cn, "#mychan")
+
+	cn.Send(context.TODO(), "PART", "#mychan")
+	testExpectMsg(t, cn, "You're not on that channel")
+}
+
 // TestPart checks users do not receive channel messages after parting.
 func TestPart(t *testing.T) {
 	s := newIRCServer(t)

@@ -628,7 +628,10 @@ func (ec *etcdClient) Part(ch, msg string) error {
 	}
 	lid := int64(ss.Lease())
 	userCtl, chNicks, chMsg := keyUserCtl(ec.nick), keyChanNicks(ch, lid), keyChanMsg(ch)
+	onChannel := false
 	f := func(stm v3sync.STM) error {
+		onChannel = false
+
 		// Remove channel from user.
 		uv, err := decodeUserValue(stm.Get(userCtl))
 		if err != nil {
@@ -637,8 +640,12 @@ func (ec *etcdClient) Part(ch, msg string) error {
 		for i, uvch := range uv.Channels {
 			if uvch == ch {
 				uv.Channels = append(uv.Channels[:i], uv.Channels[i+1:]...)
+				onChannel = true
 				break
 			}
+		}
+		if !onChannel {
+			return nil
 		}
 		stm.Put(userCtl, encodeUserValue(*uv), etcd.WithIgnoreLease())
 
@@ -675,6 +682,10 @@ func (ec *etcdClient) Part(ch, msg string) error {
 		v3sync.WithPrefetch(userCtl, chNicks),
 	)
 	cancel()
+	if !onChannel {
+		return ec.sendHostMsg(irc.ERR_NOTONCHANNEL, ch, "You're not on that channel")
+	}
+
 	return err
 }
 
