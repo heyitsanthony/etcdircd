@@ -159,7 +159,7 @@ func (s *Server) handshake(cn *Conn, cr *connectRequest) (Client, error) {
 	cli.SendMsg(s.cli.Ctx(), irc.Message{
 		Prefix:  nnpfx,
 		Command: irc.RPL_MYINFO,
-		Params:  []string{cr.nick, nn + " " + version + " i i"},
+		Params:  []string{cr.nick, nn + " " + version + " iE iE"},
 	})
 	if s.cfg.Motd != "" {
 		s.motd(cr.nick, cli)

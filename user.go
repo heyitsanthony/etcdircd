@@ -11,7 +11,7 @@ import (
 type UserValue struct {
 	Nick     string
 	User     []string
-	Mode     string
+	Mode     ModeValue
 	Host     string
 	RealName string
 	Created  time.Time

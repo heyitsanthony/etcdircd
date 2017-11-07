@@ -126,9 +126,27 @@ Important: the private keys should not be shared with etcd.
 
 ## Machine
 
-TODO: CRLs, key rotation, physical attestation, mlock keys, OTR
+This section describes ways etcdircd can mitigate compromise of a server machine.
+
+TODO: CRLs, key rotation, physical attestation, mlock keys
+
+### Enforced OTR mode
+
+Off-the-record (OTR) communication provides end-to-end encryption between clients. OTR prevents eavesdropping by the IRC server since the messages can only be decrypted by the the end user. Many IRC clients support OTR functionality through [libOTR](https://otr.cypherpunks.ca/). By using etcdircd's `E` (i.e., Encrypted) mode, the server will reject any non-OTR private message sent to or from the user.
+
+A client dismisses non-OTR private message by setting the mode:
+
+```
+/umode +E
+```
 
 ## APIs
+
+This section describes protection mechanisms supported by etcdircd when communicating over the IRC protocol.
+
+TODO: channel keys
+
+### Client certificate authentication
 
 Restrict users that can connect to the ircd by enabling client certificate authentication in the etcdircd yaml:
 
@@ -136,4 +154,3 @@ Restrict users that can connect to the ircd by enabling client certificate authe
 IrcdClientCerts: true
 ```
 
-TODO: channel keys

@@ -464,31 +464,31 @@ func (ec *etcdClient) Quit(msg string) error {
 }
 
 func (ec *etcdClient) Mode(m []string) error {
-	// STUB
-	if len(m) != 1 && len(m) != 2 {
+	if len(m) == 0 {
 		return ec.sendHostMsg(irc.ERR_NEEDMOREPARAMS, ec.nick)
 	}
 	if isChan(m[0]) {
 		return ec.sendHostMsg(irc.ERR_NOCHANMODES, m[0], "Channel doesn't support modes")
 	}
-
 	if m[0] != ec.nick {
 		return ec.sendHostMsg(irc.ERR_USERSDONTMATCH, ec.nick, "Cannot change mode for other users")
 	}
+
 	mode := ""
-	if len(m) == 2 {
-		mode = m[1]
-	}
-	// TODO: have mode parsing
+	bad := []byte{}
 
 	userCtl := keyUserCtl(ec.nick)
 	f := func(stm v3sync.STM) error {
-		// Add channel to user.
 		uv, err := decodeUserValue(stm.Get(userCtl))
 		if err != nil {
 			return err
 		}
-		uv.Mode = mode
+		for _, modeStr := range m[1:] {
+			newMv, newBad := uv.Mode.update(modeStr)
+			uv.Mode = newMv
+			bad = append(bad, newBad...)
+		}
+		mode = string(uv.Mode)
 		stm.Put(userCtl, encodeUserValue(*uv), etcd.WithIgnoreLease())
 		return nil
 	}
@@ -502,7 +502,19 @@ func (ec *etcdClient) Mode(m []string) error {
 	if err != nil {
 		return err
 	}
-	return ec.sendHostMsg(irc.MODE, ec.nick, mode)
+	if len(m) == 1 {
+		return ec.sendHostMsg(irc.RPL_UMODEIS, ec.nick, mode)
+	}
+	if err := ec.sendHostMsg(irc.MODE, ec.nick, mode); err != nil {
+		return err
+	}
+	for _, m := range bad {
+		err := ec.sendHostMsg(irc.ERR_UMODEUNKNOWNFLAG, ec.nick, string(m)+" is unknown mode char to me")
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (ec *etcdClient) Ping(msg string) error {
@@ -514,12 +526,12 @@ func (ec *etcdClient) Ping(msg string) error {
 }
 
 func (ec *etcdClient) PrivMsg(target, msg string) error {
-	ctx, cancel := context.WithTimeout(ec.ctx, 5*time.Second)
 	v := encodeMessage(irc.Message{
 		Prefix:  &ec.prefix,
 		Command: irc.PRIVMSG,
 		Params:  []string{target, msg},
 	})
+	isOtrMsg := strings.HasPrefix(msg, "?OTR")
 
 	keyCtl, keyMsg := "", ""
 	if isChan(target) {
@@ -527,24 +539,59 @@ func (ec *etcdClient) PrivMsg(target, msg string) error {
 	} else {
 		keyCtl, keyMsg = keyUserCtl(target), keyUserMsg(target)
 	}
-	// TODO: add check if any nicks key for channel
-	resp, err := ec.s.cli.Txn(ctx).If(
-		etcd.Compare(etcd.CreateRevision(keyCtl), ">", 0),
-	).Then(
-		etcd.OpPut(keyMsg, v, etcd.WithIgnoreLease()),
-	).Commit()
+	myUserCtl := keyUserCtl(ec.nick)
 
-	cancel()
+	noNick, badOtr := false, false
+	f := func(stm v3sync.STM) error {
+		if noNick = stm.Rev(keyCtl) == 0; noNick {
+			return nil
+		}
+		if !isOtrMsg && !isChan(target) {
+			uv, err := decodeUserValue(stm.Get(myUserCtl))
+			if err != nil {
+				return err
+			}
+			if badOtr = uv.Mode.has('E'); badOtr {
+				// Tried to send non-OTR message to another user.
+				return nil
+			}
+			uv, err = decodeUserValue(stm.Get(keyCtl))
+			if err != nil {
+				return err
+			}
+			if badOtr = uv.Mode.has('E'); badOtr {
+				// Tried to send non-OTR message to OTR'd user.
+				return nil
+			}
+		}
+		stm.Put(keyMsg, v, etcd.WithIgnoreLease())
+		return nil
+	}
+	_, err := v3sync.NewSTM(
+		ec.s.cli,
+		f,
+		v3sync.WithAbortContext(ec.ctx),
+		v3sync.WithIsolation(v3sync.Serializable),
+		v3sync.WithPrefetch(keyCtl, myUserCtl),
+	)
 	if err != nil {
 		return err
 	}
-	if resp.Succeeded == false {
+	if noNick {
 		glog.V(9).Infof("%q PRIVMSG to %q not found", ec.nick, target)
 		return ec.sendHostMsg(
 			irc.ERR_NOSUCHNICK,
 			ec.nick,
 			target,
 			"No such nick/channel")
+	}
+	if badOtr {
+		glog.V(9).Infof("%q PRIVMSG to %q not OTR", ec.nick, target)
+		return ec.sendHostMsg(
+			irc.ERR_NOTEXTTOSEND,
+			ec.nick,
+			target,
+			"No text to send")
 	}
 	return nil
 }

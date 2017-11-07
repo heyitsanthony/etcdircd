@@ -24,6 +24,72 @@ import (
 	"github.com/heyitsanthony/etcdircd/keyencode"
 )
 
+func TestUserMode(t *testing.T) {
+	s := newIRCServer(t)
+	defer s.Close()
+
+	cn := s.client(t, "n1")
+	defer cn.Close()
+
+	// Reject setting mode on another user.
+	cn.Send(context.TODO(), irc.MODE, "badNick", "-i")
+	testExpectMsg(t, cn, irc.ERR_USERSDONTMATCH)
+
+	// Channel modes are not yet supported.
+	cn.Send(context.TODO(), irc.MODE, "#somechan", "+i")
+	testExpectMsg(t, cn, irc.ERR_NOCHANMODES)
+
+	// No '+' or '-' is OK, but should still return errors.
+	cn.Send(context.TODO(), irc.MODE, "n1", "Q")
+	testExpectMsg(t, cn, "Q is unknown mode char to me")
+	cn.Send(context.TODO(), irc.MODE, "n1", "+Q")
+	testExpectMsg(t, cn, "Q is unknown mode char to me")
+
+	cn.Send(context.TODO(), irc.MODE, "n1")
+	testExpectMsg(t, cn, irc.RPL_UMODEIS)
+}
+
+// TestModeOTR checks that the +E OTR-only mode is respected.
+func TestModeOTR(t *testing.T) {
+	s := newIRCServer(t)
+	defer s.Close()
+
+	cn := s.client(t, "n1")
+	defer cn.Close()
+
+	cn2 := s.client(t, "n2")
+	defer cn2.Close()
+
+	myinfo := expectMsgVal(cn, irc.RPL_MYINFO)
+	testutil.AssertTrue(t, myinfo != "")
+	ss := strings.Split(myinfo, " ")
+	// user modes
+	testutil.AssertTrue(t, strings.Contains(ss[5], "E"))
+	// channel modes
+	testutil.AssertTrue(t, strings.Contains(ss[6], "E"))
+	fmt.Println(myinfo)
+
+	// Set user mode +E.
+	cn.Send(context.TODO(), irc.MODE, "n1", "+E")
+	testExpectMsg(t, cn, "E")
+
+	// Try to send non-OTR message to plaintext user.
+	cn.Send(context.TODO(), irc.PRIVMSG, "n2", "hello")
+	testExpectMsg(t, cn, "No text to send")
+
+	// Try to send non-OTR message to OTR user.
+	cn2.Send(context.TODO(), irc.PRIVMSG, "n1", "hello")
+	testExpectMsg(t, cn2, "No text to send")
+
+	// Send OTR message to plaintext user.
+	cn.Send(context.TODO(), irc.PRIVMSG, "n2", "?OTR")
+	testExpectMsg(t, cn2, "?OTR")
+
+	// Send OTR message from plaintext to OTR user.
+	cn2.Send(context.TODO(), irc.PRIVMSG, "n1", "?OTR")
+	testExpectMsg(t, cn, "?OTR")
+}
+
 // TestRejectDuplicateUsers checks a user will get a rejection
 // message if the nick is already registered.
 func TestRejectDuplicateUsers(t *testing.T) {
@@ -241,17 +307,19 @@ func testExpectMsg(t *testing.T, cn *Conn, s string) {
 	testutil.AssertTrue(t, expectMsg(cn, s))
 }
 
-func expectMsg(c *Conn, s string) bool {
+func expectMsg(c *Conn, s string) bool { return expectMsgVal(c, s) != "" }
+
+func expectMsgVal(c *Conn, s string) string {
 	t := time.NewTicker(5 * time.Second)
 	defer t.Stop()
 	for {
 		select {
 		case msg := <-c.Reader():
-			if strings.Contains(fmt.Sprintf("%+v", msg), s) {
-				return true
+			if m := fmt.Sprintf("%v", msg); strings.Contains(m, s) {
+				return m
 			}
 		case <-t.C:
-			return false
+			return ""
 		}
 	}
 }
