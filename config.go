@@ -10,6 +10,8 @@ type Config struct {
 	MaxBans     uint
 	NickLen     uint
 	TopicLen    uint
+
+	PinnedUserModes string
 }
 
 // NewConfig creates a configuration populated with some defaults

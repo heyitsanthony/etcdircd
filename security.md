@@ -140,6 +140,12 @@ A client dismisses non-OTR private message by setting the mode:
 /umode +E
 ```
 
+To force OTR regardless of user configuration, pin the mode in the etcdircd yaml file:
+
+```yaml
+PinnedUserModes: 'E'
+```
+
 ## APIs
 
 This section describes protection mechanisms supported by etcdircd when communicating over the IRC protocol.

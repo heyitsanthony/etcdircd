@@ -34,6 +34,8 @@ type etcdClient struct {
 
 func newEtcdClient(s *Server, cn ConnIRC, cr *connectRequest) (*etcdClient, error) {
 	uv := UserValue{Nick: cr.nick, User: cr.user, Created: time.Now()}
+	uv.Mode = newModeValue(s.cfg.PinnedUserModes)
+
 	ctx, cancel := context.WithTimeout(s.cli.Ctx(), 5*time.Second)
 	ss, err := s.ses.Session()
 	if err != nil {
@@ -488,6 +490,7 @@ func (ec *etcdClient) Mode(m []string) error {
 			uv.Mode = newMv
 			bad = append(bad, newBad...)
 		}
+		uv.Mode, _ = uv.Mode.update("+" + ec.s.cfg.PinnedUserModes)
 		mode = string(uv.Mode)
 		stm.Put(userCtl, encodeUserValue(*uv), etcd.WithIgnoreLease())
 		return nil
