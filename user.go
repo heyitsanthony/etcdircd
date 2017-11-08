@@ -24,7 +24,7 @@ func encodeUserValue(uv UserValue) string {
 	if err := enc.Encode(&uv); err != nil {
 		panic(err)
 	}
-	return string(buf.Bytes())
+	return buf.String()
 }
 
 func decodeUserValue(uv string) (*UserValue, error) {

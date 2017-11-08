@@ -3,16 +3,16 @@ package main
 import (
 	"fmt"
 	"os"
-	"sync"
 	"strings"
+	"sync"
 
-	"github.com/spf13/cobra"
 	etcd "github.com/coreos/etcd/clientv3"
 	"github.com/coreos/etcd/pkg/transport"
+	"github.com/spf13/cobra"
 	"gopkg.in/sorcix/irc.v2"
 
-	"github.com/heyitsanthony/etcdircd/internal/util"
 	"github.com/heyitsanthony/etcdircd"
+	"github.com/heyitsanthony/etcdircd/internal/util"
 )
 
 var (
@@ -20,9 +20,9 @@ var (
 		Use:   "ircdctl",
 		Short: "A simple command line client for etcdircd.",
 	}
-	flagTarget string
-	flagConfigPath string
-	flagEtcdConfigPath string
+	flagTarget            string
+	flagConfigPath        string
+	flagEtcdConfigPath    string
 	flagDisableEtcdCrypto bool
 )
 
@@ -65,9 +65,9 @@ func mustClient(cmd *cobra.Command) *etcd.Client {
 	var tlsinfo *transport.TLSInfo
 	if !flagDisableEtcdCrypto {
 		tlsinfo = &transport.TLSInfo{
-			KeyFile: ircCfg.EtcdCryptoKeyFile,
+			KeyFile:  ircCfg.EtcdCryptoKeyFile,
 			CertFile: ircCfg.EtcdCryptoCertFile,
-			CAFile: ircCfg.EtcdCryptoCAFile,
+			CAFile:   ircCfg.EtcdCryptoCAFile,
 		}
 	}
 	return util.MustIrcdEtcdClient(cli, ircCfg.EtcdPrefix, tlsinfo)
@@ -84,9 +84,9 @@ func runNotice(cmd *cobra.Command, args []string) {
 		ks := strings.Split(k, "/")
 		nick := ks[len(ks)-1]
 		msg := irc.Message{
-			Prefix: &irc.Prefix{Name: "ircdctl"},
+			Prefix:  &irc.Prefix{Name: "ircdctl"},
 			Command: irc.NOTICE,
-			Params: []string{nick, args[0]},
+			Params:  []string{nick, args[0]},
 		}
 		resp, err := cli.Txn(cli.Ctx()).If(
 			etcd.Compare(etcd.Version(k), ">", 0),

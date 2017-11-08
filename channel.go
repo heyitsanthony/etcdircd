@@ -34,7 +34,7 @@ func encodeChannelCtl(cc ChannelCtl) string {
 	if err := enc.Encode(&cc); err != nil {
 		panic(err)
 	}
-	return string(buf.Bytes())
+	return buf.String()
 }
 
 func decodeChannelCtl(cc string) (*ChannelCtl, error) {
@@ -52,7 +52,7 @@ func encodeChannelNicks(cn ChannelNicks) string {
 	if err := enc.Encode(&cn); err != nil {
 		panic(err)
 	}
-	return string(buf.Bytes())
+	return buf.String()
 }
 
 func decodeChannelNicks(cn string) (*ChannelNicks, error) {

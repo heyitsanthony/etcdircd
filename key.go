@@ -8,11 +8,11 @@ import (
 )
 
 const (
-	keyIdxNone int = iota
-	keyIdxType
+	keyIdxType int = iota + 1
 	keyIdxSubtype
 	keyIdxData
-	keyIdxSessions
+
+//	keyIdxSessions
 )
 
 func KeyUserMsg(n string) string { return keyUserMsg(n) }

@@ -16,7 +16,7 @@ func encodeMessage(m irc.Message) string {
 	if err := enc.Encode(&m); err != nil {
 		panic(err)
 	}
-	return string(buf.Bytes())
+	return buf.String()
 }
 
 func decodeMessage(m string) (*irc.Message, error) {

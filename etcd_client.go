@@ -52,7 +52,7 @@ func newEtcdClient(s *Server, cn ConnIRC, cr *connectRequest) (*etcdClient, erro
 	if err != nil {
 		return nil, err
 	}
-	if resp.Succeeded == false {
+	if !resp.Succeeded {
 		return nil, nil
 	}
 
@@ -188,7 +188,7 @@ func (ec *etcdClient) monitorMsg(msgc etcd.WatchChan) error {
 }
 
 func (ec *etcdClient) sendHostMsg(cmd string, params ...string) error {
-	return ec.SendMsg(ec.ctx, irc.Message{&ec.s.hostPfx, cmd, params})
+	return ec.SendMsg(ec.ctx, irc.Message{Prefix: &ec.s.hostPfx, Command: cmd, Params: params})
 }
 
 func (ec *etcdClient) Join(ch string) error {
@@ -214,9 +214,9 @@ func (ec *etcdClient) join(ch string) error {
 		return ec.sendHostMsg(irc.ERR_NOSUCHCHANNEL, ch, "No such channel")
 	}
 	userCtl, chCtl := keyUserCtl(ec.nick), keyChanCtl(ch)
-	ss, err := ec.s.ses.Session()
-	if err != nil {
-		return err
+	ss, serr := ec.s.ses.Session()
+	if serr != nil {
+		return serr
 	}
 	lid := ss.Lease()
 	chNicks, chMsg := keyChanNicks(ch, int64(lid)), keyChanMsg(ch)
@@ -247,9 +247,9 @@ func (ec *etcdClient) join(ch string) error {
 			chv.Name = ch
 			chv.Created = time.Now()
 		} else {
-			chvv, err := decodeChannelCtl(chctlv)
-			if err != nil {
-				return err
+			chvv, cerr := decodeChannelCtl(chctlv)
+			if cerr != nil {
+				return cerr
 			}
 			chv = *chvv
 		}
@@ -672,9 +672,9 @@ func (ec *etcdClient) Part(ch, msg string) error {
 		Params:  []string{ch, msg},
 	})
 	// XXX use session for nick id
-	ss, err := ec.s.ses.Session()
-	if err != nil {
-		return err
+	ss, serr := ec.s.ses.Session()
+	if serr != nil {
+		return serr
 	}
 	lid := int64(ss.Lease())
 	userCtl, chNicks, chMsg := keyUserCtl(ec.nick), keyChanNicks(ch, lid), keyChanMsg(ch)
@@ -724,7 +724,7 @@ func (ec *etcdClient) Part(ch, msg string) error {
 	}
 
 	ctx, cancel := context.WithTimeout(ec.ctx, 5*time.Second)
-	_, err = v3sync.NewSTM(
+	_, err := v3sync.NewSTM(
 		ec.s.cli,
 		f,
 		v3sync.WithAbortContext(ctx),

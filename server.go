@@ -114,7 +114,11 @@ func (s *Server) handshake(cn *Conn, cr *connectRequest) (Client, error) {
 		if err != nil {
 			return nil, err
 		}
-		msg := irc.Message{&s.hostPfx, irc.ERR_NICKNAMEINUSE, []string{cr.nick}}
+		msg := irc.Message{
+			Prefix:  &s.hostPfx,
+			Command: irc.ERR_NICKNAMEINUSE,
+			Params:  []string{cr.nick},
+		}
 		cn.SendMsg(s.cli.Ctx(), msg)
 		select {
 		case rmsg := <-cn.Reader():

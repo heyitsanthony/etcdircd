@@ -6,9 +6,9 @@ import (
 
 var userModes = map[byte]struct{}{
 	// invisible
-	'i': struct{}{},
+	'i': {},
 	// OTR only
-	'E': struct{}{},
+	'E': {},
 }
 
 type ModeValue []byte
