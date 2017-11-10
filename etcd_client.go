@@ -33,8 +33,12 @@ type etcdClient struct {
 }
 
 func newEtcdClient(s *Server, cn ConnIRC, cr *connectRequest) (*etcdClient, error) {
-	uv := UserValue{Nick: cr.nick, User: cr.user, Created: time.Now()}
-	uv.Mode = newModeValue(s.cfg.PinnedUserModes)
+	uv := UserValue{
+		Nick:    cr.nick,
+		User:    cr.user,
+		Mode:    newModeValue(s.cfg.PinnedUserModes),
+		Created: time.Now(),
+	}
 
 	ctx, cancel := context.WithTimeout(s.cli.Ctx(), 5*time.Second)
 	ss, err := s.ses.Session()
@@ -83,10 +87,10 @@ func newEtcdClient(s *Server, cn ConnIRC, cr *connectRequest) (*etcdClient, erro
 	return ec, nil
 }
 
-// monitorPart waits for deletions on a channel's nicks prefix and reports the lost
-// nicks as leaves to the other parties in the channel.
-func (ec *etcdClient) monitorPart(ch string, nicksc etcd.WatchChan) error {
-	for resp := range nicksc {
+// monitorPart waits for deletions on a channel's users prefix and reports the lost
+// users as leaves to the other parties in the channel.
+func (ec *etcdClient) monitorPart(ch string, usersc etcd.WatchChan) error {
+	for resp := range usersc {
 		if err := resp.Err(); err != nil {
 			return err
 		}
@@ -120,7 +124,7 @@ func (ec *etcdClient) monitorPart(ch string, nicksc etcd.WatchChan) error {
 				glog.V(9).Infof("got error on decode %v", err)
 				continue
 			}
-			if err := ec.sendParts(ch, *cns); err != nil {
+			if err := ec.sendParts(ch, *cns, ev.Kv.ModRevision-1); err != nil {
 				return err
 			}
 		}
@@ -128,11 +132,15 @@ func (ec *etcdClient) monitorPart(ch string, nicksc etcd.WatchChan) error {
 	return ec.ctx.Err()
 }
 
-func (ec *etcdClient) sendParts(ch string, cns ChannelNicks) error {
+func (ec *etcdClient) sendParts(ch string, cns ChannelNicks, rev int64) error {
 	glog.V(9).Infof("sendLeaves: %q sending %+v", ch, cns)
-	for _, cn := range cns.Nicks {
+	users, err := ec.usersFromNicks(cns.Nicks, rev)
+	if err != nil {
+		return err
+	}
+	for _, u := range users {
 		msg := irc.Message{
-			Prefix:  &irc.Prefix{Name: cn.Nick, User: cn.User, Host: cn.Host},
+			Prefix:  &irc.Prefix{Name: u.Nick, User: u.User[1], Host: u.Host},
 			Command: irc.PART,
 			Params:  []string{ch, "session lost"},
 		}
@@ -258,24 +266,16 @@ func (ec *etcdClient) join(ch string) error {
 
 		// Add user to server's channel nick list.
 		var cns ChannelNicks
-		nicks := stm.Get(chNicks)
-		if len(nicks) > 0 {
-			cn, err := decodeChannelNicks(nicks)
+		users := stm.Get(chNicks)
+		if len(users) > 0 {
+			cn, err := decodeChannelNicks(users)
 			if err != nil {
 				return err
 			}
 			cns = *cn
 		}
-		cn := channelNick{
-			Nick:       ec.nick,
-			User:       ec.prefix.User,
-			Host:       ec.prefix.Host,
-			ServerName: ec.s.cfg.HostName,
-			Realname:   "norton",
-		}
-		cns.Nicks = append(cns.Nicks, cn)
-		nicks = encodeChannelNicks(cns)
-		stm.Put(chNicks, nicks, etcd.WithLease(lid))
+		cns.Nicks = append(cns.Nicks, uv.Nick)
+		stm.Put(chNicks, encodeChannelNicks(cns), etcd.WithLease(lid))
 
 		// Broadcast the join to the channel members.
 		stm.Put(chMsg, msgVal)
@@ -305,7 +305,7 @@ func (ec *etcdClient) join(ch string) error {
 		ec.sendHostMsg(irc.RPL_TOPIC, ec.nick, ch, topic)
 	}
 	// and the list of users who are on the channel (using RPL_NAMREPLY)
-	// Fetch nicks at time of join.
+	// Fetch users at time of join.
 	if err := ec.names(ch, resp.Header.Revision); err != nil {
 		return err
 	}
@@ -344,23 +344,13 @@ func (ec *etcdClient) monitorChannel(ch string, rev int64) {
 }
 
 func (ec *etcdClient) names(ch string, rev int64) error {
-	nickResp, err := ec.s.cli.Get(
-		ec.ctx,
-		keyChanNicksPfx(ch),
-		etcd.WithPrefix(),
-		etcd.WithRev(rev))
+	users, err := ec.usersFromMask(ch, rev)
 	if err != nil {
 		return err
 	}
-	nicks := []string{}
-	for _, serv := range nickResp.Kvs {
-		cn, err := decodeChannelNicks(string(serv.Value))
-		if err != nil {
-			return err
-		}
-		for _, nick := range cn.Nicks {
-			nicks = append(nicks, nick.Nick)
-		}
+	nicks := make([]string, len(users))
+	for i, u := range users {
+		nicks[i] = u.Nick
 	}
 	ec.sendHostMsg(irc.RPL_NAMREPLY, ec.nick, "=", ch, strings.Join(nicks, " "))
 	return ec.sendHostMsg(irc.RPL_ENDOFNAMES, ec.nick, ch, "End of NAMES list")
@@ -369,39 +359,29 @@ func (ec *etcdClient) names(ch string, rev int64) error {
 func (ec *etcdClient) Who(args []string) error {
 	// The <mask> passed to WHO is matched against users' host, server, real
 	// name and nickname if the channel <mask> cannot be found.
-	if len(args) == 0 {
-		return ec.sendHostMsg(irc.ERR_NEEDMOREPARAMS, "who", "Not enough parameters")
+	mask := ""
+	if len(args) == 0 || args[0] == "0" {
+		mask = "*"
+	} else {
+		mask = args[0]
 	}
-	if isChan(args[0]) {
-		return ec.whoChan(args[0])
-	}
-	return nil
-}
-
-func (ec *etcdClient) whoChan(ch string) error {
-	resp, err := ec.s.cli.Get(ec.ctx, keyChanNicksPfx(ch), etcd.WithPrefix())
+	users, err := ec.usersFromMask(mask, 0)
 	if err != nil {
 		return err
 	}
-	for _, kv := range resp.Kvs {
-		nicks, err := decodeChannelNicks(string(kv.Value))
-		if err != nil {
+	for _, u := range users {
+		v := fmt.Sprintf("%s %s %s %s %s %s H",
+			ec.nick,
+			"*",
+			u.User[1],
+			u.Host,
+			u.ServerName,
+			u.Nick)
+		if err := ec.sendHostMsg(irc.RPL_WHOREPLY, v, "0 "+u.RealName); err != nil {
 			return err
 		}
-		for _, n := range nicks.Nicks {
-			v := fmt.Sprintf("%s %s %s %s %s %s H",
-				ec.nick,
-				ch,
-				n.User,
-				n.Host,
-				n.ServerName,
-				n.Nick)
-			if err := ec.sendHostMsg(irc.RPL_WHOREPLY, v, "0 "+n.Realname); err != nil {
-				return err
-			}
-		}
 	}
-	return ec.sendHostMsg(irc.RPL_ENDOFWHO, ec.nick, ch, "End of WHO list")
+	return ec.sendHostMsg(irc.RPL_ENDOFWHO, ec.nick, mask, "End of WHO list")
 }
 
 func (ec *etcdClient) Quit(msg string) error {
@@ -418,22 +398,17 @@ func (ec *etcdClient) Quit(msg string) error {
 		}
 		lid := ss.Lease()
 		for _, ch := range uv.Channels {
-			// Remove from nicks in channel.
+			// Remove from users in channel.
 			chNicks := keyChanNicks(ch, int64(lid))
-			nicks := stm.Get(chNicks)
-			if len(nicks) == 0 {
+			users := stm.Get(chNicks)
+			if len(users) == 0 {
 				continue
 			}
-			cns, err := decodeChannelNicks(nicks)
+			cns, err := decodeChannelNicks(users)
 			if err != nil {
 				return err
 			}
-			for i, cnick := range cns.Nicks {
-				if cnick.Nick == ec.nick {
-					cns.Nicks = append(cns.Nicks[:i], cns.Nicks[i+1:]...)
-					break
-				}
-			}
+			cns.del(ec.nick)
 			stm.Put(chNicks, encodeChannelNicks(*cns), etcd.WithIgnoreLease())
 
 			// Broadcast quit to channel.
@@ -485,6 +460,7 @@ func (ec *etcdClient) Mode(m []string) error {
 		if err != nil {
 			return err
 		}
+		oldMode := uv.Mode
 		for _, modeStr := range m[1:] {
 			newMv, newBad := uv.Mode.update(modeStr)
 			uv.Mode = newMv
@@ -492,6 +468,10 @@ func (ec *etcdClient) Mode(m []string) error {
 		}
 		uv.Mode, _ = uv.Mode.update("+" + ec.s.cfg.PinnedUserModes)
 		mode = string(uv.Mode)
+		if uv.Mode.Equal(oldMode) {
+			return nil
+		}
+
 		stm.Put(userCtl, encodeUserValue(*uv), etcd.WithIgnoreLease())
 		return nil
 	}
@@ -700,23 +680,14 @@ func (ec *etcdClient) Part(ch, msg string) error {
 		stm.Put(userCtl, encodeUserValue(*uv), etcd.WithIgnoreLease())
 
 		// Remove user from server's channel nick list.
-		var cns ChannelNicks
-		nicks := stm.Get(chNicks)
-		if len(nicks) > 0 {
-			cn, err := decodeChannelNicks(nicks)
+		if users := stm.Get(chNicks); len(users) > 0 {
+			cn, err := decodeChannelNicks(users)
 			if err != nil {
 				return err
 			}
-			cns = *cn
+			cn.del(ec.nick)
+			stm.Put(chNicks, encodeChannelNicks(*cn), etcd.WithIgnoreLease())
 		}
-		for i, cnick := range cns.Nicks {
-			if cnick.Nick == ec.nick {
-				cns.Nicks = append(cns.Nicks[:i], cns.Nicks[i+1:]...)
-				break
-			}
-		}
-		nicks = encodeChannelNicks(cns)
-		stm.Put(chNicks, nicks, etcd.WithIgnoreLease())
 
 		// Broadcast the part to the channel members.
 		stm.Put(chMsg, msgVal)
@@ -813,4 +784,112 @@ func (ec *etcdClient) Topic(ch, msg string) error {
 	)
 	cancel()
 	return err
+}
+
+func (ec *etcdClient) usersFromMask(mask string, rev int64) ([]UserValue, error) {
+	if isChan(mask) {
+		return ec.usersFromChannel(mask, rev)
+	}
+	if mask == "*" {
+		return ec.users(rev)
+	}
+	return ec.usersFromNicks([]string{mask}, rev)
+}
+
+func (ec *etcdClient) users(rev int64) ([]UserValue, error) {
+	resp, err := ec.s.cli.Txn(ec.ctx).Then(
+		etcd.OpGet(keyUserCtl(""), etcd.WithPrefix(), etcd.WithRev(rev)),
+		etcd.OpGet(keyUserCtl(ec.nick), etcd.WithRev(rev)),
+	).Commit()
+	if err != nil {
+		return nil, err
+	}
+	meKv := resp.Responses[1].GetResponseRange().Kvs[0]
+	me, err := decodeUserValue(string(meKv.Value))
+	if err != nil {
+		return nil, err
+	}
+	users := []UserValue{}
+	for _, kv := range resp.Responses[0].GetResponseRange().Kvs {
+		u, err := decodeUserValue(string(kv.Value))
+		if err != nil {
+			return nil, err
+		}
+		users = append(users, *u)
+	}
+	return pruneInvisible(users, *me), nil
+}
+
+func (ec *etcdClient) usersFromChannel(ch string, rev int64) ([]UserValue, error) {
+	resp, err := ec.s.cli.Get(ec.ctx,
+		keyChanNicksPfx(ch),
+		etcd.WithRev(rev),
+		etcd.WithPrefix())
+	if err != nil {
+		return nil, err
+	}
+	nicks := []string{}
+	for _, kv := range resp.Kvs {
+		n, err := decodeChannelNicks(string(kv.Value))
+		if err != nil {
+			return nil, err
+		}
+		nicks = append(nicks, n.Nicks...)
+	}
+	return ec.usersFromNicks(nicks, resp.Header.Revision)
+}
+
+func (ec *etcdClient) usersFromNicks(nicks []string, rev int64) ([]UserValue, error) {
+	ops := make([]etcd.Op, len(nicks)+1)
+	for i, n := range nicks {
+		ops[i] = etcd.OpGet(keyUserCtl(n), etcd.WithRev(rev))
+	}
+	ops[len(ops)-1] = etcd.OpGet(keyUserCtl(ec.nick), etcd.WithRev(rev))
+
+	resp, err := ec.s.cli.Txn(ec.ctx).Then(ops...).Commit()
+	if err != nil {
+		return nil, err
+	}
+	users := []UserValue{}
+	for _, r := range resp.Responses {
+		uv, err := decodeUserValue(string(r.GetResponseRange().Kvs[0].Value))
+		if err != nil {
+			return nil, err
+		}
+		users = append(users, *uv)
+	}
+	return pruneInvisible(users[:len(users)-1], users[len(users)-1]), nil
+}
+
+func stringSliceToMap(ss []string) map[string]struct{} {
+	m := make(map[string]struct{}, len(ss))
+	for _, s := range ss {
+		m[s] = struct{}{}
+	}
+	return m
+}
+
+func pruneInvisible(users []UserValue, me UserValue) []UserValue {
+	if me.Mode.has('o') {
+		return users
+	}
+	ret := []UserValue{}
+	uchan := stringSliceToMap(me.Channels)
+	for _, user := range users {
+		if !user.Mode.has('i') {
+			ret = append(ret, user)
+			continue
+		}
+		sharedChannels := []string{}
+		for _, ch := range user.Channels {
+			if _, ok := uchan[ch]; ok {
+				sharedChannels = append(sharedChannels, ch)
+			}
+		}
+		if len(sharedChannels) > 0 {
+			user.Channels = sharedChannels
+			ret = append(ret, user)
+		}
+	}
+	return ret
 }

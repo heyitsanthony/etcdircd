@@ -53,6 +53,7 @@ func ClientDo(c Client, msg *irc.Message) error {
 	case irc.NAMES:
 		// Command: NAMES
 		// Parameters: [ <channel> *( "," <channel> ) [ <target> ] ]
+		return c.Names(msg.Params[0])
 	case irc.PING:
 		return c.Ping(msg.Params[0])
 	case irc.PART:

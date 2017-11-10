@@ -49,6 +49,59 @@ func TestUserMode(t *testing.T) {
 	testExpectMsg(t, cn, irc.RPL_UMODEIS)
 }
 
+func TestInvisible(t *testing.T) {
+	s := newIRCServer(t)
+	defer s.Close()
+
+	cns := make([]*Conn, 3)
+	for i := range cns {
+		cns[i] = s.client(t, fmt.Sprintf("n%d", i))
+		defer cns[i].Close()
+	}
+
+	cns[0].Send(context.TODO(), irc.JOIN, "#chan")
+	testExpectMsg(t, cns[0], "chan")
+	cns[1].Send(context.TODO(), irc.JOIN, "#chan")
+	testExpectMsg(t, cns[1], "chan")
+
+	cns[1].Send(context.TODO(), irc.JOIN, "#hello")
+	testExpectMsg(t, cns[1], "hello")
+	cns[2].Send(context.TODO(), irc.JOIN, "#hello")
+	testExpectMsg(t, cns[2], "hello")
+
+	// match wildcard
+	cns[0].Send(context.TODO(), irc.WHO, "0")
+	testExpectMsgs(t, cns[0], []string{"n0", "n1", "n2"})
+
+	// match channel
+	cns[0].Send(context.TODO(), irc.WHO, "#chan")
+	testExpectMsgs(t, cns[0], []string{"n0", "n1"})
+	cns[0].Send(context.TODO(), irc.WHO, "#hello")
+	testExpectMsgs(t, cns[0], []string{"n1", "n2"})
+
+	// Mark n2 as invisible.
+	cns[2].Send(context.TODO(), irc.MODE, "n2", "+i")
+	testExpectMsg(t, cns[2], irc.MODE)
+
+	// No channels shared between n0 and n2, so don't show n1 in wildcard.
+	cns[0].Send(context.TODO(), irc.WHO, "*")
+	testExpectRejectMsgs(t, cns[0], []string{"n0", "n1"}, []string{"n2"})
+
+	// n1 and n2 share #hello, but not #chan.
+	cns[1].Send(context.TODO(), irc.WHOIS, "n2")
+	testExpectRejectMsgs(t, cns[1], []string{"#hello"}, []string{"#chan"})
+
+	// Should see n1 but not n2 in #hello.
+	cns[0].Send(context.TODO(), irc.NAMES, "#hello")
+	testExpectRejectMsgs(t, cns[0], []string{"n1"}, []string{"n2"})
+
+	// Mark n2 as visible.
+	cns[2].Send(context.TODO(), irc.MODE, "n2", "-i")
+	testExpectMsg(t, cns[2], irc.MODE)
+	cns[0].Send(context.TODO(), irc.NAMES, "#hello")
+	testExpectMsg(t, cns[0], "n2")
+}
+
 // TestModeOTR checks that the +E OTR-only mode is respected.
 func TestModeOTR(t *testing.T) {
 	s := newIRCServer(t)
@@ -303,43 +356,6 @@ func TestSessionPart(t *testing.T) {
 	testExpectMsg(t, cn2, "PART")
 }
 
-func testExpectMsg(t *testing.T, cn *Conn, s string) {
-	testutil.AssertTrue(t, expectMsg(cn, s))
-}
-
-func expectMsg(c *Conn, s string) bool { return expectMsgVal(c, s) != "" }
-
-func expectMsgVal(c *Conn, s string) string {
-	t := time.NewTicker(5 * time.Second)
-	defer t.Stop()
-	for {
-		select {
-		case msg := <-c.Reader():
-			if m := fmt.Sprintf("%v", msg); strings.Contains(m, s) {
-				return m
-			}
-		case <-t.C:
-			return ""
-		}
-	}
-}
-
-func expectSilence(c *Conn) bool {
-	t := time.NewTicker(200 * time.Millisecond)
-	defer t.Stop()
-	for {
-		select {
-		case msg := <-c.Reader():
-			if msg.Command == irc.PING || msg.Command == irc.PONG {
-				continue
-			}
-			return false
-		case <-t.C:
-			return true
-		}
-	}
-}
-
 // TestPartNoMsg checks that parting with no message works.
 func TestPartNoMsg(t *testing.T) {
 	s := newIRCServer(t)
@@ -585,4 +601,73 @@ func newIRCServer(t *testing.T) *ircServer {
 		c()
 	}
 	return clus.irc[0]
+}
+
+func testExpectMsg(t *testing.T, cn *Conn, s string) {
+	testutil.AssertTrue(t, expectMsg(cn, s))
+}
+
+func testExpectMsgs(t *testing.T, cn *Conn, s []string) {
+	testutil.AssertTrue(t, len(expectMsgVals(cn, s, nil)) == len(s))
+}
+
+func testExpectRejectMsgs(t *testing.T, cn *Conn, s []string, rej []string) {
+	testutil.AssertTrue(t, len(expectMsgVals(cn, s, rej)) == len(s))
+}
+
+func expectMsg(c *Conn, s string) bool { return expectMsgVal(c, s) != "" }
+
+func expectMsgVal(c *Conn, s string) string {
+	if ret := expectMsgVals(c, []string{s}, nil); len(ret) > 0 {
+		return ret[0]
+	}
+	return ""
+}
+
+func expectMsgVals(c *Conn, s []string, rej []string) (ret []string) {
+	unmatched := make(map[string]struct{}, len(s))
+	for i := range s {
+		unmatched[s[i]] = struct{}{}
+	}
+	t := time.NewTicker(5 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case msg := <-c.Reader():
+			m := fmt.Sprintf("%v", msg)
+			for _, r := range rej {
+				if strings.Contains(m, r) {
+					return nil
+				}
+			}
+			for u := range unmatched {
+				if strings.Contains(m, u) {
+					ret = append(ret, m)
+					delete(unmatched, u)
+					break
+				}
+			}
+			if len(unmatched) == 0 {
+				return ret
+			}
+		case <-t.C:
+			return nil
+		}
+	}
+}
+
+func expectSilence(c *Conn) bool {
+	t := time.NewTicker(200 * time.Millisecond)
+	defer t.Stop()
+	for {
+		select {
+		case msg := <-c.Reader():
+			if msg.Command == irc.PING || msg.Command == irc.PONG {
+				continue
+			}
+			return false
+		case <-t.C:
+			return true
+		}
+	}
 }

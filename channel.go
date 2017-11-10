@@ -15,17 +15,19 @@ type ChannelCtl struct {
 	Created time.Time
 }
 
-type channelNick struct {
-	Nick       string
-	User       string
-	Host       string
-	ServerName string
-	Realname   string
-}
-
 // ChannelNicks is one per server session; holds all nick data.
 type ChannelNicks struct {
-	Nicks []channelNick
+	Nicks []string
+}
+
+func (cu *ChannelNicks) del(nick string) bool {
+	for i, u := range cu.Nicks {
+		if u == nick {
+			cu.Nicks = append(cu.Nicks[:i], cu.Nicks[i+1:]...)
+			return true
+		}
+	}
+	return false
 }
 
 func encodeChannelCtl(cc ChannelCtl) string {

@@ -137,13 +137,12 @@ func (s *Server) handshake(cn *Conn, cr *connectRequest) (Client, error) {
 	// User[2] is the host the client wants to access.
 
 	nnpfx := &irc.Prefix{Name: nn}
-	uv := UserValue{Nick: cr.nick, User: cr.user}
 	cli.SendMsg(s.cli.Ctx(), irc.Message{
 		Prefix:  nnpfx,
 		Command: irc.RPL_WELCOME,
 		Params: []string{
 			cr.nick,
-			"Welcome to an Internet Relay Network " + uv.Nick + "!" + uv.User[1] + "@masked",
+			"Welcome to an Internet Relay Network " + cr.nick + "!" + cr.user[1] + "@masked",
 		},
 	})
 	cli.SendMsg(s.cli.Ctx(), irc.Message{

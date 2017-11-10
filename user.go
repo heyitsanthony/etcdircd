@@ -7,13 +7,14 @@ import (
 	"time"
 )
 
-// UserValue represents the user in etcd.
 type UserValue struct {
-	Nick     string
-	User     []string
-	Mode     ModeValue
-	Host     string
-	RealName string
+	Nick       string
+	User       []string
+	ServerName string
+	Mode       ModeValue
+	Host       string
+	RealName   string
+
 	Created  time.Time
 	Channels []string
 }

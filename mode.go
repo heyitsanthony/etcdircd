@@ -62,3 +62,5 @@ func (mv ModeValue) update(modeStr string) (_ ModeValue, bad []byte) {
 	}
 	return mv, bad
 }
+
+func (mv ModeValue) Equal(mv2 ModeValue) bool { return bytes.Equal(mv, mv2) }
