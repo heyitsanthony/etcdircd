@@ -17,6 +17,7 @@ type UserValue struct {
 
 	Created  time.Time
 	Channels []string
+	AwayMsg  string
 }
 
 func encodeUserValue(uv UserValue) string {

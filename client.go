@@ -23,6 +23,7 @@ type Client interface {
 	Who(args []string) error
 	PrivMsg(target, msg string) error
 	Topic(ch, msg string) error
+	Away(msg string) error
 
 	Close() error
 }
@@ -30,6 +31,14 @@ type Client interface {
 func ClientDo(c Client, msg *irc.Message) error {
 	glog.V(7).Infof("GOT %+v", msg)
 	switch msg.Command {
+	case irc.AWAY:
+		awayMsg := ""
+		if len(msg.Params) > 0 {
+			if awayMsg = msg.Params[0]; awayMsg == "" {
+				awayMsg = "User is away"
+			}
+		}
+		return c.Away(awayMsg)
 	case irc.CAP:
 	case irc.WHOIS:
 		return c.Whois(msg.Params[0])

@@ -49,6 +49,33 @@ func TestUserMode(t *testing.T) {
 	testExpectMsg(t, cn, irc.RPL_UMODEIS)
 }
 
+func TestAway(t *testing.T) {
+	s := newIRCServer(t)
+	defer s.Close()
+
+	cn1 := s.client(t, "n1")
+	defer cn1.Close()
+	cn2 := s.client(t, "n2")
+	defer cn2.Close()
+
+	// Don't allow setting away without AWAY command.
+	cn2.Send(context.TODO(), irc.MODE, "n2", "+a")
+	testExpectMsg(t, cn2, "a is unknown mode char to me")
+
+	cn2.Send(context.TODO(), irc.AWAY, "I am away")
+	testExpectMsg(t, cn2, irc.RPL_NOWAWAY)
+
+	cn1.Send(context.TODO(), irc.PRIVMSG, "n2", "hello")
+	testExpectMsg(t, cn1, "I am away")
+	testutil.AssertTrue(t, expectSilence(cn2))
+
+	cn2.Send(context.TODO(), irc.AWAY)
+	testExpectMsg(t, cn2, irc.RPL_UNAWAY)
+
+	cn1.Send(context.TODO(), irc.PRIVMSG, "n2", "hello")
+	testExpectMsg(t, cn2, "hello")
+}
+
 func TestInvisible(t *testing.T) {
 	s := newIRCServer(t)
 	defer s.Close()

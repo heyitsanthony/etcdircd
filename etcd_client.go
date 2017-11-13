@@ -529,6 +529,21 @@ func (ec *etcdClient) PrivMsg(target, msg string) error {
 		if noNick = stm.Rev(keyCtl) == 0; noNick {
 			return nil
 		}
+		uvTarget, terr := decodeUserValue(stm.Get(keyCtl))
+		if !isChan(target) {
+			if terr != nil {
+				return terr
+			}
+			if uvTarget.Mode.has('a') {
+				awayMsg := encodeMessage(irc.Message{
+					Prefix:  &ec.prefix,
+					Command: irc.RPL_AWAY,
+					Params:  []string{target, uvTarget.AwayMsg},
+				})
+				stm.Put(keyUserMsg(ec.nick), awayMsg, etcd.WithIgnoreLease())
+				return nil
+			}
+		}
 		if !isOtrMsg && !isChan(target) {
 			uv, err := decodeUserValue(stm.Get(myUserCtl))
 			if err != nil {
@@ -538,11 +553,7 @@ func (ec *etcdClient) PrivMsg(target, msg string) error {
 				// Tried to send non-OTR message to another user.
 				return nil
 			}
-			uv, err = decodeUserValue(stm.Get(keyCtl))
-			if err != nil {
-				return err
-			}
-			if badOtr = uv.Mode.has('E'); badOtr {
+			if badOtr = uvTarget.Mode.has('E'); badOtr {
 				// Tried to send non-OTR message to OTR'd user.
 				return nil
 			}
@@ -784,6 +795,38 @@ func (ec *etcdClient) Topic(ch, msg string) error {
 	)
 	cancel()
 	return err
+}
+
+func (ec *etcdClient) Away(msg string) error {
+	k := keyUserCtl(ec.nick)
+	f := func(stm v3sync.STM) error {
+		uv, err := decodeUserValue(stm.Get(k))
+		if err != nil {
+			return err
+		}
+		if msg == "" {
+			uv.Mode = uv.Mode.del('a')
+		} else {
+			uv.Mode = uv.Mode.add('a')
+		}
+		uv.AwayMsg = msg
+		stm.Put(k, encodeUserValue(*uv), etcd.WithIgnoreLease())
+		return nil
+	}
+	_, err := v3sync.NewSTM(
+		ec.s.cli,
+		f,
+		v3sync.WithAbortContext(ec.ctx),
+		v3sync.WithIsolation(v3sync.Serializable),
+		v3sync.WithPrefetch(k),
+	)
+	if err != nil {
+		return err
+	}
+	if msg == "" {
+		return ec.sendHostMsg(irc.RPL_UNAWAY, ec.nick, "You are no longer marked as being away")
+	}
+	return ec.sendHostMsg(irc.RPL_NOWAWAY, ec.nick, "You have been marked as being away")
 }
 
 func (ec *etcdClient) usersFromMask(mask string, rev int64) ([]UserValue, error) {
