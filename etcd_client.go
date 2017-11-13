@@ -281,15 +281,7 @@ func (ec *etcdClient) join(ch string) error {
 		stm.Put(chMsg, msgVal)
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.TODO(), 5*time.Second)
-	resp, err := v3sync.NewSTM(
-		ec.s.cli,
-		f,
-		v3sync.WithAbortContext(ctx),
-		v3sync.WithIsolation(v3sync.Serializable),
-		v3sync.WithPrefetch(userCtl, chCtl, chNicks),
-	)
-	cancel()
+	rev, err := ec.doSTM(f, userCtl, chCtl, chNicks)
 	if err != nil {
 		return err
 	}
@@ -306,10 +298,10 @@ func (ec *etcdClient) join(ch string) error {
 	}
 	// and the list of users who are on the channel (using RPL_NAMREPLY)
 	// Fetch users at time of join.
-	if err := ec.names(ch, resp.Header.Revision); err != nil {
+	if err := ec.names(ch, rev); err != nil {
 		return err
 	}
-	ec.monitorChannel(ch, resp.Header.Revision+1)
+	ec.monitorChannel(ch, rev+1)
 	return ec.ctx.Err()
 }
 
@@ -424,16 +416,7 @@ func (ec *etcdClient) Quit(msg string) error {
 		stm.Del(keyUserMsg(ec.nick))
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(ec.ctx, 5*time.Second)
-	_, err := v3sync.NewSTM(
-		ec.s.cli,
-		f,
-		v3sync.WithAbortContext(ctx),
-		v3sync.WithIsolation(v3sync.Serializable),
-		v3sync.WithPrefetch(userCtl),
-	)
-	cancel()
-	if err != nil {
+	if _, err := ec.doSTM(f, userCtl); err != nil {
 		glog.Warning(err)
 		return err
 	}
@@ -475,14 +458,7 @@ func (ec *etcdClient) Mode(m []string) error {
 		stm.Put(userCtl, encodeUserValue(*uv), etcd.WithIgnoreLease())
 		return nil
 	}
-	_, err := v3sync.NewSTM(
-		ec.s.cli,
-		f,
-		v3sync.WithAbortContext(ec.ctx),
-		v3sync.WithIsolation(v3sync.Serializable),
-		v3sync.WithPrefetch(userCtl),
-	)
-	if err != nil {
+	if _, err := ec.doSTM(f, userCtl); err != nil {
 		return err
 	}
 	if len(m) == 1 {
@@ -538,7 +514,7 @@ func (ec *etcdClient) PrivMsg(target, msg string) error {
 				awayMsg := encodeMessage(irc.Message{
 					Prefix:  &ec.prefix,
 					Command: irc.RPL_AWAY,
-					Params:  []string{target, uvTarget.AwayMsg},
+					Params:  []string{ec.nick, target, uvTarget.AwayMsg},
 				})
 				stm.Put(keyUserMsg(ec.nick), awayMsg, etcd.WithIgnoreLease())
 				return nil
@@ -561,14 +537,7 @@ func (ec *etcdClient) PrivMsg(target, msg string) error {
 		stm.Put(keyMsg, v, etcd.WithIgnoreLease())
 		return nil
 	}
-	_, err := v3sync.NewSTM(
-		ec.s.cli,
-		f,
-		v3sync.WithAbortContext(ec.ctx),
-		v3sync.WithIsolation(v3sync.Serializable),
-		v3sync.WithPrefetch(keyCtl, myUserCtl),
-	)
-	if err != nil {
+	if _, err := ec.doSTM(f, keyCtl, myUserCtl); err != nil {
 		return err
 	}
 	if noNick {
@@ -704,21 +673,13 @@ func (ec *etcdClient) Part(ch, msg string) error {
 		stm.Put(chMsg, msgVal)
 		return nil
 	}
-
-	ctx, cancel := context.WithTimeout(ec.ctx, 5*time.Second)
-	_, err := v3sync.NewSTM(
-		ec.s.cli,
-		f,
-		v3sync.WithAbortContext(ctx),
-		v3sync.WithIsolation(v3sync.Serializable),
-		v3sync.WithPrefetch(userCtl, chNicks),
-	)
-	cancel()
+	if _, err := ec.doSTM(f, userCtl, chNicks); err != nil {
+		return nil
+	}
 	if !onChannel {
 		return ec.sendHostMsg(irc.ERR_NOTONCHANNEL, ch, "You're not on that channel")
 	}
-
-	return err
+	return nil
 }
 
 func (ec *etcdClient) Whois(n string) error {
@@ -785,15 +746,7 @@ func (ec *etcdClient) Topic(ch, msg string) error {
 		stm.Put(chMsg, msgVal)
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.TODO(), 5*time.Second)
-	_, err := v3sync.NewSTM(
-		ec.s.cli,
-		f,
-		v3sync.WithAbortContext(ctx),
-		v3sync.WithIsolation(v3sync.Serializable),
-		v3sync.WithPrefetch(chCtl),
-	)
-	cancel()
+	_, err := ec.doSTM(f, chCtl)
 	return err
 }
 
@@ -813,14 +766,7 @@ func (ec *etcdClient) Away(msg string) error {
 		stm.Put(k, encodeUserValue(*uv), etcd.WithIgnoreLease())
 		return nil
 	}
-	_, err := v3sync.NewSTM(
-		ec.s.cli,
-		f,
-		v3sync.WithAbortContext(ec.ctx),
-		v3sync.WithIsolation(v3sync.Serializable),
-		v3sync.WithPrefetch(k),
-	)
-	if err != nil {
+	if _, err := ec.doSTM(f, k); err != nil {
 		return err
 	}
 	if msg == "" {
@@ -904,35 +850,16 @@ func (ec *etcdClient) usersFromNicks(nicks []string, rev int64) ([]UserValue, er
 	return pruneInvisible(users[:len(users)-1], users[len(users)-1]), nil
 }
 
-func stringSliceToMap(ss []string) map[string]struct{} {
-	m := make(map[string]struct{}, len(ss))
-	for _, s := range ss {
-		m[s] = struct{}{}
+func (ec *etcdClient) doSTM(f func(v3sync.STM) error, prefetch ...string) (int64, error) {
+	resp, err := v3sync.NewSTM(
+		ec.s.cli,
+		f,
+		v3sync.WithAbortContext(ec.ctx),
+		v3sync.WithIsolation(v3sync.Serializable),
+		v3sync.WithPrefetch(prefetch...),
+	)
+	if err != nil {
+		return 0, err
 	}
-	return m
-}
-
-func pruneInvisible(users []UserValue, me UserValue) []UserValue {
-	if me.Mode.has('o') {
-		return users
-	}
-	ret := []UserValue{}
-	uchan := stringSliceToMap(me.Channels)
-	for _, user := range users {
-		if !user.Mode.has('i') {
-			ret = append(ret, user)
-			continue
-		}
-		sharedChannels := []string{}
-		for _, ch := range user.Channels {
-			if _, ok := uchan[ch]; ok {
-				sharedChannels = append(sharedChannels, ch)
-			}
-		}
-		if len(sharedChannels) > 0 {
-			user.Channels = sharedChannels
-			ret = append(ret, user)
-		}
-	}
-	return ret
+	return resp.Header.Revision, nil
 }
