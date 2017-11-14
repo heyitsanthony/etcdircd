@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"context"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -196,7 +197,13 @@ func (ec *etcdClient) monitorMsg(msgc etcd.WatchChan) error {
 }
 
 func (ec *etcdClient) sendHostMsg(cmd string, params ...string) error {
-	return ec.SendMsg(ec.ctx, irc.Message{Prefix: &ec.s.hostPfx, Command: cmd, Params: params})
+	return ec.SendMsg(
+		ec.ctx,
+		irc.Message{
+			Prefix:  &ec.s.hostPfx,
+			Command: cmd,
+			Params:  append([]string{ec.nick}, params...),
+		})
 }
 
 func (ec *etcdClient) Join(ch string) error {
@@ -292,9 +299,9 @@ func (ec *etcdClient) join(ch string) error {
 	ec.SendMsg(ec.ctx, msg)
 	// then sent the channel's topic (using RPL_TOPIC)
 	if topic == "" {
-		ec.sendHostMsg(irc.RPL_NOTOPIC, ec.nick, ch, "No topic is set")
+		ec.sendHostMsg(irc.RPL_NOTOPIC, ch, "No topic is set")
 	} else {
-		ec.sendHostMsg(irc.RPL_TOPIC, ec.nick, ch, topic)
+		ec.sendHostMsg(irc.RPL_TOPIC, ch, topic)
 	}
 	// and the list of users who are on the channel (using RPL_NAMREPLY)
 	// Fetch users at time of join.
@@ -344,8 +351,8 @@ func (ec *etcdClient) names(ch string, rev int64) error {
 	for i, u := range users {
 		nicks[i] = u.Nick
 	}
-	ec.sendHostMsg(irc.RPL_NAMREPLY, ec.nick, "=", ch, strings.Join(nicks, " "))
-	return ec.sendHostMsg(irc.RPL_ENDOFNAMES, ec.nick, ch, "End of NAMES list")
+	ec.sendHostMsg(irc.RPL_NAMREPLY, "=", ch, strings.Join(nicks, " "))
+	return ec.sendHostMsg(irc.RPL_ENDOFNAMES, ch, "End of NAMES list")
 }
 
 func (ec *etcdClient) Who(args []string) error {
@@ -362,8 +369,7 @@ func (ec *etcdClient) Who(args []string) error {
 		return err
 	}
 	for _, u := range users {
-		v := fmt.Sprintf("%s %s %s %s %s %s H",
-			ec.nick,
+		v := fmt.Sprintf("%s %s %s %s %s H",
 			"*",
 			u.User[1],
 			u.Host,
@@ -373,7 +379,7 @@ func (ec *etcdClient) Who(args []string) error {
 			return err
 		}
 	}
-	return ec.sendHostMsg(irc.RPL_ENDOFWHO, ec.nick, mask, "End of WHO list")
+	return ec.sendHostMsg(irc.RPL_ENDOFWHO, mask, "End of WHO list")
 }
 
 func (ec *etcdClient) Quit(msg string) error {
@@ -424,14 +430,11 @@ func (ec *etcdClient) Quit(msg string) error {
 }
 
 func (ec *etcdClient) Mode(m []string) error {
-	if len(m) == 0 {
-		return ec.sendHostMsg(irc.ERR_NEEDMOREPARAMS, ec.nick)
-	}
 	if isChan(m[0]) {
 		return ec.sendHostMsg(irc.ERR_NOCHANMODES, m[0], "Channel doesn't support modes")
 	}
 	if m[0] != ec.nick {
-		return ec.sendHostMsg(irc.ERR_USERSDONTMATCH, ec.nick, "Cannot change mode for other users")
+		return ec.sendHostMsg(irc.ERR_USERSDONTMATCH, "Cannot change mode for other users")
 	}
 
 	mode := ""
@@ -462,13 +465,13 @@ func (ec *etcdClient) Mode(m []string) error {
 		return err
 	}
 	if len(m) == 1 {
-		return ec.sendHostMsg(irc.RPL_UMODEIS, ec.nick, mode)
+		return ec.sendHostMsg(irc.RPL_UMODEIS, mode)
 	}
-	if err := ec.sendHostMsg(irc.MODE, ec.nick, mode); err != nil {
+	if err := ec.sendHostMsg(irc.MODE, mode); err != nil {
 		return err
 	}
 	for _, m := range bad {
-		err := ec.sendHostMsg(irc.ERR_UMODEUNKNOWNFLAG, ec.nick, string(m)+" is unknown mode char to me")
+		err := ec.sendHostMsg(irc.ERR_UMODEUNKNOWNFLAG, string(m)+" is unknown mode char to me")
 		if err != nil {
 			return err
 		}
@@ -481,7 +484,13 @@ func (ec *etcdClient) Ping(msg string) error {
 	if _, err := ec.s.cli.Get(ec.ctx, keyUserCtl(ec.nick)); err != nil {
 		return err
 	}
-	return ec.sendHostMsg(irc.PONG, ec.s.cfg.HostName, msg)
+	return ec.SendMsg(
+		ec.ctx,
+		irc.Message{
+			Prefix:  &ec.s.hostPfx,
+			Command: irc.PONG,
+			Params:  []string{ec.s.cfg.HostName, msg},
+		})
 }
 
 func (ec *etcdClient) PrivMsg(target, msg string) error {
@@ -544,7 +553,6 @@ func (ec *etcdClient) PrivMsg(target, msg string) error {
 		glog.V(9).Infof("%q PRIVMSG to %q not found", ec.nick, target)
 		return ec.sendHostMsg(
 			irc.ERR_NOSUCHNICK,
-			ec.nick,
 			target,
 			"No such nick/channel")
 	}
@@ -552,10 +560,63 @@ func (ec *etcdClient) PrivMsg(target, msg string) error {
 		glog.V(9).Infof("%q PRIVMSG to %q not OTR", ec.nick, target)
 		return ec.sendHostMsg(
 			irc.ERR_NOTEXTTOSEND,
-			ec.nick,
 			target,
 			"No text to send")
 	}
+	return nil
+}
+
+func (ec *etcdClient) Oper(login, pass string) error {
+	loggedIn := false
+	userKey, operKey := keyUserCtl(ec.nick), keyOperCtl(login)
+	f := func(stm v3sync.STM) error {
+		uv, err := decodeUserValue(stm.Get(userKey))
+		if err != nil {
+			return err
+		}
+		ovValue := stm.Get(operKey)
+		if len(ovValue) == 0 {
+			return nil
+		}
+		ov, err := decodeOperValue(ovValue)
+		if err != nil {
+			return err
+		}
+		if ov.Pass != pass {
+			return nil
+		}
+		loggedIn = true
+		if ov.Global {
+			uv.Mode = uv.Mode.add('O')
+		} else {
+			uv.Mode = uv.Mode.add('o')
+		}
+		stm.Put(userKey, encodeUserValue(*uv), etcd.WithIgnoreLease())
+		return nil
+	}
+	if _, err := ec.doSTM(f, userKey, operKey); err != nil {
+		return err
+	}
+	if !loggedIn {
+		return ec.sendHostMsg(irc.ERR_PASSWDMISMATCH, "Password incorrect")
+	}
+	return ec.sendHostMsg(irc.RPL_YOUREOPER, "You are now an IRC operator")
+}
+
+func (ec *etcdClient) Die() error {
+	resp, err := ec.s.cli.Get(ec.ctx, keyUserCtl(ec.nick))
+	if err != nil {
+		return err
+	}
+	uv, err := decodeUserValue(string(resp.Kvs[0].Value))
+	if err != nil {
+		return err
+	}
+	if !uv.Mode.has('o') && !uv.Mode.has('O') {
+		return ec.sendHostMsg(irc.ERR_NOPRIVILEGES, "Permission Denied- You're not an IRC operator")
+	}
+	// TODO: send die message to users, send die message to non-local servers
+	os.Exit(0)
 	return nil
 }
 
@@ -608,7 +669,6 @@ func (ec *etcdClient) List(chs []string) error {
 		// "<channel> <# visible> :<topic>"
 		ec.sendHostMsg(
 			irc.RPL_LIST,
-			ec.nick,
 			repl.channel,
 			fmt.Sprintf("%d", repl.visible),
 			" "+repl.topic)
@@ -622,10 +682,6 @@ func (ec *etcdClient) Names(ch string) error {
 }
 
 func (ec *etcdClient) Part(ch, msg string) error {
-	if !isChan(ch) {
-		return ec.sendHostMsg(irc.ERR_NOSUCHCHANNEL, ch, "No such channel")
-	}
-
 	msgVal := encodeMessage(irc.Message{
 		Prefix:  &ec.prefix,
 		Command: irc.PART,
@@ -683,9 +739,8 @@ func (ec *etcdClient) Part(ch, msg string) error {
 }
 
 func (ec *etcdClient) Whois(n string) error {
-	if isChan(n) {
-		glog.V(9).Infof("whois: no such nick %q", n)
-		return ec.sendHostMsg(irc.ERR_NOSUCHNICK, n, "No such nick")
+	if n == "" {
+		n = ec.nick
 	}
 	resp, err := ec.s.cli.Get(ec.ctx, keyUserCtl(n))
 	if err != nil {
@@ -702,10 +757,10 @@ func (ec *etcdClient) Whois(n string) error {
 		return err
 	}
 	// "<nick> <user> <host> * : <real name>"
-	ec.sendHostMsg(irc.RPL_WHOISUSER, ec.nick, n, uv.User[1], "servername", "*", " norton")
+	ec.sendHostMsg(irc.RPL_WHOISUSER, n, uv.User[1], "servername", "*", " norton")
 	if len(uv.Channels) > 0 {
 		// "<nick> :*( ( "@" / "+" ) <channel> " " )"
-		ec.sendHostMsg(irc.RPL_WHOISCHANNELS, ec.nick, n, strings.Join(uv.Channels, " "))
+		ec.sendHostMsg(irc.RPL_WHOISCHANNELS, n, strings.Join(uv.Channels, " "))
 	}
 	// TODO idle time
 	// TODO modes
@@ -719,9 +774,6 @@ func (ec *etcdClient) Close() error {
 }
 
 func (ec *etcdClient) Topic(ch, msg string) error {
-	if !isChan(ch) {
-		return ec.sendHostMsg(irc.ERR_NOSUCHCHANNEL, ch, "No such channel")
-	}
 	msgVal := encodeMessage(irc.Message{
 		Prefix:  &ec.prefix,
 		Command: irc.TOPIC,
@@ -770,9 +822,9 @@ func (ec *etcdClient) Away(msg string) error {
 		return err
 	}
 	if msg == "" {
-		return ec.sendHostMsg(irc.RPL_UNAWAY, ec.nick, "You are no longer marked as being away")
+		return ec.sendHostMsg(irc.RPL_UNAWAY, "You are no longer marked as being away")
 	}
-	return ec.sendHostMsg(irc.RPL_NOWAWAY, ec.nick, "You have been marked as being away")
+	return ec.sendHostMsg(irc.RPL_NOWAWAY, "You have been marked as being away")
 }
 
 func (ec *etcdClient) usersFromMask(mask string, rev int64) ([]UserValue, error) {

@@ -49,6 +49,69 @@ func TestUserMode(t *testing.T) {
 	testExpectMsg(t, cn, irc.RPL_UMODEIS)
 }
 
+func TestOper(t *testing.T) {
+	s := newIRCServer(t)
+	defer s.Close()
+
+	cn1 := s.client(t, "n1")
+	defer cn1.Close()
+
+	cn2 := s.client(t, "n2")
+	defer cn2.Close()
+
+	cn2.Send(context.TODO(), irc.MODE, "n2", "+i")
+	testExpectMsg(t, cn2, irc.MODE)
+
+	// Too few params.
+	cn1.Send(context.TODO(), irc.OPER, "n1")
+	testExpectMsg(t, cn1, irc.ERR_NEEDMOREPARAMS)
+
+	// Try to become operator without credentials.
+	cn1.Send(context.TODO(), irc.OPER, "guy", "pass")
+	testExpectMsg(t, cn1, irc.ERR_PASSWDMISMATCH)
+
+	// Reject Die command.
+	cn1.Send(context.TODO(), irc.DIE)
+	testExpectMsg(t, cn1, irc.ERR_NOPRIVILEGES)
+
+	// Manually add a local operator.
+	ov := OperValue{Pass: "pass", Global: false}
+	_, err := s.s.cli.Put(context.TODO(), keyOperCtl("guy"), encodeOperValue(ov))
+	testutil.AssertNil(t, err)
+
+	cn1.Send(context.TODO(), irc.OPER, "guy", "pass")
+	testExpectMsg(t, cn1, irc.RPL_YOUREOPER)
+
+	// List invisible users.
+	cn1.Send(context.TODO(), irc.WHO, "0")
+	testExpectMsg(t, cn1, "n2")
+
+	cn1.Send(context.TODO(), irc.MODE, "n1", "-o")
+	testExpectMsg(t, cn1, irc.MODE)
+
+	// Reject Die command.
+	cn1.Send(context.TODO(), irc.DIE)
+	testExpectMsg(t, cn1, irc.ERR_NOPRIVILEGES)
+
+	// Manually add a global operator.
+	ov = OperValue{Pass: "pass2", Global: true}
+	_, err = s.s.cli.Put(context.TODO(), keyOperCtl("guy"), encodeOperValue(ov))
+	testutil.AssertNil(t, err)
+
+	cn1.Send(context.TODO(), irc.OPER, "guy", "pass2")
+	testExpectMsg(t, cn1, irc.RPL_YOUREOPER)
+	// List invisible users.
+	cn1.Send(context.TODO(), irc.WHO, "0")
+	testExpectMsg(t, cn1, "n2")
+
+	cn1.Send(context.TODO(), irc.MODE, "n1", "-O")
+	testExpectMsg(t, cn1, irc.MODE)
+
+	// Reject Die command.
+	cn1.Send(context.TODO(), irc.DIE)
+	testExpectMsg(t, cn1, irc.ERR_NOPRIVILEGES)
+}
+
 func TestAway(t *testing.T) {
 	s := newIRCServer(t)
 	defer s.Close()
@@ -147,7 +210,6 @@ func TestModeOTR(t *testing.T) {
 	testutil.AssertTrue(t, strings.Contains(ss[5], "E"))
 	// channel modes
 	testutil.AssertTrue(t, strings.Contains(ss[6], "E"))
-	fmt.Println(myinfo)
 
 	// Set user mode +E.
 	cn.Send(context.TODO(), irc.MODE, "n1", "+E")

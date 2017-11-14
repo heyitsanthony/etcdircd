@@ -24,13 +24,19 @@ type Client interface {
 	PrivMsg(target, msg string) error
 	Topic(ch, msg string) error
 	Away(msg string) error
+	Oper(login, pass string) error
+	Die() error
 
 	Close() error
+
+	sendHostMsg(cmd string, params ...string) error
 }
 
 func ClientDo(c Client, msg *irc.Message) error {
 	glog.V(7).Infof("GOT %+v", msg)
 	switch msg.Command {
+	case irc.DIE:
+		return c.Die()
 	case irc.AWAY:
 		awayMsg := ""
 		if len(msg.Params) > 0 {
@@ -39,9 +45,22 @@ func ClientDo(c Client, msg *irc.Message) error {
 			}
 		}
 		return c.Away(awayMsg)
+	case irc.OPER:
+		if len(msg.Params) < 2 {
+			return c.sendHostMsg(irc.ERR_NEEDMOREPARAMS, "Need more parameters")
+		}
+		return c.Oper(msg.Params[0], msg.Params[1])
 	case irc.CAP:
 	case irc.WHOIS:
-		return c.Whois(msg.Params[0])
+		n := ""
+		if len(msg.Params) > 0 {
+			n = msg.Params[0]
+			if isChan(n) {
+				glog.V(9).Infof("whois: no such nick %q", n)
+				return c.sendHostMsg(irc.ERR_NOSUCHNICK, n, "No such nick")
+			}
+		}
+		return c.Whois(n)
 	case irc.WHO:
 		return c.Who(msg.Params)
 	case irc.JOIN:
@@ -51,6 +70,9 @@ func ClientDo(c Client, msg *irc.Message) error {
 		}
 		return c.Join(msg.Params[0])
 	case irc.MODE:
+		if len(msg.Params) == 0 {
+			return c.sendHostMsg(irc.ERR_NEEDMOREPARAMS, "Need more parameters")
+		}
 		return c.Mode(msg.Params)
 	case irc.LIST:
 		// Parameters: [ <channel> *( "," <channel> ) [ <target> ] ]
@@ -66,17 +88,28 @@ func ClientDo(c Client, msg *irc.Message) error {
 	case irc.PING:
 		return c.Ping(msg.Params[0])
 	case irc.PART:
+		if len(msg.Params) == 0 {
+			return c.sendHostMsg(irc.ERR_NEEDMOREPARAMS, "Need more parameters")
+		}
+		ch := msg.Params[0]
+		if !isChan(ch) {
+			return c.sendHostMsg(irc.ERR_NOSUCHCHANNEL, ch, "No such channel")
+		}
 		partMsg := ""
 		if len(msg.Params) > 1 {
 			partMsg = msg.Params[1]
 		}
-		return c.Part(msg.Params[0], partMsg)
+		return c.Part(ch, partMsg)
 	case irc.QUIT:
 		return c.Quit(msg.Params[0])
 	case irc.PRIVMSG:
 		return c.PrivMsg(msg.Params[0], msg.Params[1])
 	case irc.TOPIC:
-		return c.Topic(msg.Params[0], msg.Params[1])
+		ch := msg.Params[0]
+		if !isChan(ch) {
+			return c.sendHostMsg(irc.ERR_NOSUCHCHANNEL, ch, "No such channel")
+		}
+		return c.Topic(ch, msg.Params[1])
 	}
 	return nil
 }

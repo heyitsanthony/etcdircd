@@ -5,10 +5,29 @@ import (
 )
 
 var userModes = map[byte]struct{}{
-	// invisible
+	// Away
+	'a': {},
+	// Invisible
 	'i': {},
-	// OTR only
+	// Local operator
+	'o': {},
+	// OTR encrypted
 	'E': {},
+	// Global operator
+	'O': {},
+}
+
+var userAddModes = map[byte]struct{}{
+	'i': {},
+	'E': {},
+}
+
+var userDelModes = map[byte]struct{}{
+	'a': {},
+	'i': {},
+	'o': {},
+	'E': {},
+	'O': {},
 }
 
 type ModeValue []byte
@@ -39,7 +58,7 @@ func (mv ModeValue) update(modeStr string) (_ ModeValue, bad []byte) {
 	switch ms[0] {
 	case '+':
 		for _, m := range ms[1:] {
-			if _, ok := userModes[m]; ok {
+			if _, ok := userAddModes[m]; ok {
 				mv = mv.add(m)
 			} else {
 				bad = append(bad, m)
@@ -47,7 +66,7 @@ func (mv ModeValue) update(modeStr string) (_ ModeValue, bad []byte) {
 		}
 	case '-':
 		for _, m := range ms[1:] {
-			if _, ok := userModes[m]; ok {
+			if _, ok := userDelModes[m]; ok {
 				mv = mv.del(m)
 			} else {
 				bad = append(bad, m)

@@ -27,6 +27,8 @@ func keyChanMsg(ch string) string             { return "/chan/msg/" + ch }
 func keyChanNicksPfx(ch string) string        { return "/chan/nicks/" + ch + "/" }
 func keyChanNicks(ch string, id int64) string { return fmt.Sprintf("/chan/nicks/%s/%x", ch, id) }
 
+func keyOperCtl(n string) string { return "/oper/ctl/" + n }
+
 func IsChan(ch string) bool { return isChan(ch) }
 
 func isChan(ch string) bool {

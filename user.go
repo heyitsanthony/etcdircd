@@ -47,13 +47,14 @@ func stringSliceToMap(ss []string) map[string]struct{} {
 }
 
 func pruneInvisible(users []UserValue, me UserValue) []UserValue {
-	if me.Mode.has('o') {
+	if me.Mode.has('O') {
 		return users
 	}
+	isLocalOp := me.Mode.has('o')
 	ret := []UserValue{}
 	uchan := stringSliceToMap(me.Channels)
 	for _, user := range users {
-		if !user.Mode.has('i') {
+		if !user.Mode.has('i') || (isLocalOp && user.ServerName == me.ServerName) {
 			ret = append(ret, user)
 			continue
 		}
