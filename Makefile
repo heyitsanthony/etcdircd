@@ -19,3 +19,8 @@ fmt-vet:
 	go vet ./...
 fmt-fmt:
 	! ( gofmt -l -s . 2>&1 | grep -v vendor)
+
+.PHONY: glide-update
+glide-update:
+	glide update --strip-vendor
+	glide vc --only-code --no-tests --use-lock-file

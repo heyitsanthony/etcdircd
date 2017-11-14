@@ -12,3 +12,5 @@ import:
   version: 6ec38d9a34f28644c9109886b17266d8fdac41a6
 - package: github.com/spf13/cobra
   version: 7b2c5ac9fc04fc5efafb60700713d4fa609b777b
+- package: github.com/spf13/pflag
+  version: 4c012f6dcd9546820e378d0bdda4d8fc772cdfea

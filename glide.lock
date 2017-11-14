@@ -1,5 +1,5 @@
-hash: bd97c3e4221deb17d741779777ff50587e92b9cd0af17496db25607c431e34d9
-updated: 2017-10-18T04:50:27.578358002-07:00
+hash: ec7db70e26535c0c7cbb261cfe6179591ff9f0f93e213be0ae3c45d461c2cd07
+updated: 2017-11-14T14:18:57.662225334-08:00
 imports:
 - name: github.com/beorn7/perks
   version: 4c0e84591b9aa9e6dcfdf3e020114cd81f89d5f9
@@ -146,7 +146,7 @@ imports:
 - name: github.com/spf13/cobra
   version: 7b2c5ac9fc04fc5efafb60700713d4fa609b777b
 - name: github.com/spf13/pflag
-  version: 08b1a584251b5b62f458943640fc8ebd4d50aaa5
+  version: 4c012f6dcd9546820e378d0bdda4d8fc772cdfea
 - name: github.com/ugorji/go
   version: ded73eae5db7e7a0ef6f55aace87a2873c5d2b74
   subpackages:
@@ -173,7 +173,7 @@ imports:
   subpackages:
   - unix
 - name: golang.org/x/text
-  version: c01e4764d870b77f8abe5096ee19ad20d80e8075
+  version: b19bf474d317b857955b12035d2c5acb57ce8b01
   subpackages:
   - secure/bidirule
   - transform
