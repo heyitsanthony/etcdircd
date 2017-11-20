@@ -2,6 +2,7 @@ package etcdircd
 
 import (
 	"strings"
+	"sync"
 
 	"github.com/golang/glog"
 	"gopkg.in/sorcix/irc.v2"
@@ -72,7 +73,7 @@ func ClientDo(c Client, msg *irc.Message) error {
 			n = msg.Params[0]
 			if isChan(n) {
 				glog.V(9).Infof("whois: no such nick %q", n)
-				return c.sendHostMsg(irc.ERR_NOSUCHNICK, n, "No such nick")
+				return noSuchNick(c, n)
 			}
 		}
 		return c.Whois(n)
@@ -80,10 +81,32 @@ func ClientDo(c Client, msg *irc.Message) error {
 		return c.Who(msg.Params)
 	case irc.JOIN:
 		// Parameters: ( <ch> *( "," <ch> ) [ <key> *( "," <key> ) ] ) / "0"
+		if len(msg.Params) == 0 {
+			return needMoreParams(c)
+		}
 		if len(msg.Params) > 1 {
 			glog.V(9).Infof("not supported %+v", msg)
 		}
-		return c.Join(msg.Params[0])
+		chs := strings.Split(msg.Params[0], ",")
+		for i := range chs {
+			if !isChan(chs[i]) {
+				return noSuchChannel(c, chs[i])
+			}
+		}
+		errc := make(chan error, len(chs))
+		var wg sync.WaitGroup
+		wg.Add(len(chs))
+		for i := range chs {
+			go func(ch string) {
+				defer wg.Done()
+				if err := c.Join(ch); err != nil {
+					errc <- err
+				}
+			}(chs[i])
+		}
+		wg.Wait()
+		close(errc)
+		return <-errc
 	case irc.MODE:
 		if len(msg.Params) == 0 {
 			return needMoreParams(c)
@@ -108,7 +131,7 @@ func ClientDo(c Client, msg *irc.Message) error {
 		}
 		ch := msg.Params[0]
 		if !isChan(ch) {
-			return c.sendHostMsg(irc.ERR_NOSUCHCHANNEL, ch, "No such channel")
+			return noSuchChannel(c, ch)
 		}
 		partMsg := ""
 		if len(msg.Params) > 1 {
@@ -142,4 +165,12 @@ func needMoreParams(c Client) error {
 
 func badChanMask(c Client, ch string) error {
 	return c.sendHostMsg(irc.ERR_BADCHANMASK, ch, "Bad Channel Mask")
+}
+
+func noSuchChannel(c Client, ch string) error {
+	return c.sendHostMsg(irc.ERR_NOSUCHCHANNEL, ch, "No such channel")
+}
+
+func noSuchNick(c Client, n string) error {
+	return c.sendHostMsg(irc.ERR_NOSUCHNICK, n, "No such nick/channel")
 }

@@ -212,27 +212,6 @@ func (ec *etcdClient) sendHostMsg(cmd string, params ...string) error {
 }
 
 func (ec *etcdClient) Join(ch string) error {
-	chs := strings.Split(ch, ",")
-	errc := make(chan error, len(chs))
-	var wg sync.WaitGroup
-	wg.Add(len(chs))
-	for i := range chs {
-		go func(ch string) {
-			defer wg.Done()
-			if err := ec.join(ch); err != nil {
-				errc <- err
-			}
-		}(chs[i])
-	}
-	wg.Wait()
-	close(errc)
-	return <-errc
-}
-
-func (ec *etcdClient) join(ch string) error {
-	if !isChan(ch) {
-		return ec.sendHostMsg(irc.ERR_NOSUCHCHANNEL, ch, "No such channel")
-	}
 	userCtl, chCtl := keyUserCtl(ec.nick), keyChanCtl(ch)
 	ss, serr := ec.s.ses.Session()
 	if serr != nil {
@@ -645,10 +624,7 @@ func (ec *etcdClient) privMsgUser(target, msg string) error {
 	}
 	if noNick {
 		glog.V(9).Infof("%q PRIVMSG to %q not found", ec.nick, target)
-		return ec.sendHostMsg(
-			irc.ERR_NOSUCHNICK,
-			target,
-			"No such nick/channel")
+		return noSuchNick(ec, target)
 	}
 	if badOtr {
 		glog.V(9).Infof("%q PRIVMSG to %q not OTR", ec.nick, target)
@@ -704,7 +680,7 @@ func (ec *etcdClient) privMsgChan(ch, msg string) error {
 	}
 	switch {
 	case noNick:
-		return ec.sendHostMsg(irc.ERR_NOSUCHNICK, ch, "No such nick/channel")
+		return noSuchNick(ec, ch)
 	case noSend:
 		return ec.sendHostMsg(irc.ERR_CANNOTSENDTOCHAN, ch, "Cannot send to channel")
 	}
@@ -923,8 +899,6 @@ func (ec *etcdClient) Part(ch, msg string) error {
 	userCtl, chNicks, chMsg := keyUserCtl(ec.nick), keyChanNicks(ch, lid), keyChanMsg(ch)
 	onChannel := false
 	f := func(stm v3sync.STM) error {
-		onChannel = false
-
 		// Remove channel from user.
 		uv, err := decodeUserValue(stm.Get(userCtl))
 		if err != nil {
@@ -950,7 +924,7 @@ func (ec *etcdClient) Part(ch, msg string) error {
 		return nil
 	}
 	if _, err := ec.doSTM(f, userCtl, chNicks); err != nil {
-		return nil
+		return err
 	}
 	if !onChannel {
 		return ec.sendHostMsg(irc.ERR_NOTONCHANNEL, ch, "You're not on that channel")
@@ -969,7 +943,7 @@ func (ec *etcdClient) Whois(n string) error {
 	}
 	if len(resp.Kvs) == 0 || len(resp.Kvs[0].Value) == 0 {
 		glog.V(9).Infof("whois: no such nick %q", n)
-		return ec.sendHostMsg(irc.ERR_NOSUCHNICK, n, "No such nick")
+		return noSuchNick(ec, n)
 	}
 	uv, err := decodeUserValue(string(resp.Kvs[0].Value))
 	if err != nil {
@@ -1003,11 +977,10 @@ func (ec *etcdClient) Topic(ch string, msg *string) error {
 	topic, noChan, notOnChan, notOp := "", false, false, false
 
 	f := func(stm v3sync.STM) error {
-		chctlv := stm.Get(chCtl)
-		if noChan = len(chctlv) == 0; noChan {
+		if noChan = stm.Rev(chCtl) == 0; noChan {
 			return nil
 		}
-		chv, err := decodeChannelCtl(chctlv)
+		chv, err := decodeChannelCtl(stm.Get(chCtl))
 		if err != nil {
 			return err
 		}
