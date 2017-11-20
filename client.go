@@ -22,10 +22,11 @@ type Client interface {
 	Whois(n string) error
 	Who(args []string) error
 	PrivMsg(target, msg string) error
-	Topic(ch, msg string) error
+	Topic(ch string, msg *string) error
 	Away(msg string) error
 	Oper(login, pass string) error
 	Die() error
+	Kick(ch string, nicks []string, msg string) error
 
 	Close() error
 
@@ -35,6 +36,20 @@ type Client interface {
 func ClientDo(c Client, msg *irc.Message) error {
 	glog.V(7).Infof("GOT %+v", msg)
 	switch msg.Command {
+	case irc.KICK:
+		if len(msg.Params) < 2 {
+			return needMoreParams(c)
+		}
+		ch := msg.Params[0]
+		if !isChan(ch) {
+			return badChanMask(c, ch)
+		}
+		nicks := strings.Split(msg.Params[1], ",")
+		kickMsg := ""
+		if len(msg.Params) >= 3 {
+			kickMsg = msg.Params[2]
+		}
+		return c.Kick(ch, nicks, kickMsg)
 	case irc.DIE:
 		return c.Die()
 	case irc.AWAY:
@@ -47,7 +62,7 @@ func ClientDo(c Client, msg *irc.Message) error {
 		return c.Away(awayMsg)
 	case irc.OPER:
 		if len(msg.Params) < 2 {
-			return c.sendHostMsg(irc.ERR_NEEDMOREPARAMS, "Need more parameters")
+			return needMoreParams(c)
 		}
 		return c.Oper(msg.Params[0], msg.Params[1])
 	case irc.CAP:
@@ -71,7 +86,7 @@ func ClientDo(c Client, msg *irc.Message) error {
 		return c.Join(msg.Params[0])
 	case irc.MODE:
 		if len(msg.Params) == 0 {
-			return c.sendHostMsg(irc.ERR_NEEDMOREPARAMS, "Need more parameters")
+			return needMoreParams(c)
 		}
 		return c.Mode(msg.Params)
 	case irc.LIST:
@@ -89,7 +104,7 @@ func ClientDo(c Client, msg *irc.Message) error {
 		return c.Ping(msg.Params[0])
 	case irc.PART:
 		if len(msg.Params) == 0 {
-			return c.sendHostMsg(irc.ERR_NEEDMOREPARAMS, "Need more parameters")
+			return needMoreParams(c)
 		}
 		ch := msg.Params[0]
 		if !isChan(ch) {
@@ -105,11 +120,26 @@ func ClientDo(c Client, msg *irc.Message) error {
 	case irc.PRIVMSG:
 		return c.PrivMsg(msg.Params[0], msg.Params[1])
 	case irc.TOPIC:
+		if len(msg.Params) < 1 {
+			return needMoreParams(c)
+		}
 		ch := msg.Params[0]
 		if !isChan(ch) {
-			return c.sendHostMsg(irc.ERR_NOSUCHCHANNEL, ch, "No such channel")
+			return badChanMask(c, ch)
 		}
-		return c.Topic(ch, msg.Params[1])
+		var topic *string
+		if len(msg.Params) > 1 {
+			topic = &msg.Params[1]
+		}
+		return c.Topic(ch, topic)
 	}
 	return nil
+}
+
+func needMoreParams(c Client) error {
+	return c.sendHostMsg(irc.ERR_NEEDMOREPARAMS, "Need more parameters")
+}
+
+func badChanMask(c Client, ch string) error {
+	return c.sendHostMsg(irc.ERR_BADCHANMASK, ch, "Bad Channel Mask")
 }

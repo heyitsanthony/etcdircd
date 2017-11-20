@@ -18,6 +18,8 @@ type UserValue struct {
 	Created  time.Time
 	Channels []string
 	AwayMsg  string
+
+	Lease int64 // stm needs to support Lease()
 }
 
 func encodeUserValue(uv UserValue) string {
@@ -36,6 +38,25 @@ func decodeUserValue(uv string) (*UserValue, error) {
 		return nil, err
 	}
 	return v, nil
+}
+
+func (uv *UserValue) inChan(ch string) bool {
+	for _, c := range uv.Channels {
+		if c == ch {
+			return true
+		}
+	}
+	return false
+}
+
+func (uv *UserValue) part(ch string) bool {
+	for i, uvch := range uv.Channels {
+		if uvch == ch {
+			uv.Channels = append(uv.Channels[:i], uv.Channels[i+1:]...)
+			return true
+		}
+	}
+	return false
 }
 
 func stringSliceToMap(ss []string) map[string]struct{} {

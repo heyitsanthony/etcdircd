@@ -49,6 +49,110 @@ func TestUserMode(t *testing.T) {
 	testExpectMsg(t, cn, irc.RPL_UMODEIS)
 }
 
+func TestChanMode(t *testing.T) {
+	s := newIRCServer(t)
+	defer s.Close()
+
+	var cn [3]*Conn
+	for i := range cn {
+		cn[i] = s.client(t, fmt.Sprintf("n%d", i))
+		defer cn[i].Close()
+	}
+
+	// n0 is op
+	cn[0].Send(context.TODO(), irc.JOIN, "#chan")
+	testExpectMsg(t, cn[0], irc.RPL_ENDOFNAMES)
+	// n1 is not op
+	cn[1].Send(context.TODO(), irc.JOIN, "#chan")
+	testExpectMsg(t, cn[1], irc.RPL_ENDOFNAMES)
+	testExpectMsg(t, cn[0], irc.JOIN)
+
+	// +s; hide channel from list
+	// not op
+	cn[1].Send(context.TODO(), irc.MODE, "#chan", "+s")
+	testExpectMsg(t, cn[1], irc.ERR_CHANOPRIVSNEEDED)
+	cn[1].Send(context.TODO(), irc.LIST)
+	testExpectMsgs(t, cn[1], []string{"#chan", irc.RPL_LISTEND})
+	// op
+	cn[0].Send(context.TODO(), irc.MODE, "#chan", "+s")
+	testExpectMsg(t, cn[0], "#chan")
+	cn[2].Send(context.TODO(), irc.LIST)
+	testExpectRejectMsgs(t, cn[2], []string{irc.RPL_LISTEND}, []string{"#chan"})
+	// unset
+	cn[0].Send(context.TODO(), irc.MODE, "#chan", "-s")
+	testExpectMsg(t, cn[0], "#chan")
+	cn[2].Send(context.TODO(), irc.LIST)
+	testExpectMsgs(t, cn[2], []string{"#chan", irc.RPL_LISTEND})
+
+	// TODO: hide from whois/names
+
+	// +m; only op/voice can message channel
+	cn[0].Send(context.TODO(), irc.MODE, "#chan", "+m")
+	testExpectMsg(t, cn[0], irc.MODE)
+	cn[1].Send(context.TODO(), irc.PRIVMSG, "#chan", "hello")
+	testExpectMsg(t, cn[1], irc.ERR_CANNOTSENDTOCHAN)
+	cn[0].Send(context.TODO(), irc.PRIVMSG, "#chan", "hello from cn0")
+	testExpectMsg(t, cn[1], "hello from cn0")
+
+	// +t; topic cannot be set by operators
+	cn[0].Send(context.TODO(), irc.MODE, "#chan", "+t", "-m")
+	testExpectMsg(t, cn[0], irc.MODE)
+	cn[1].Send(context.TODO(), irc.TOPIC, "#chan", "new topic")
+	testExpectMsg(t, cn[1], irc.ERR_CHANOPRIVSNEEDED)
+	cn[0].Send(context.TODO(), irc.TOPIC, "#chan", "topic2")
+	testExpectMsg(t, cn[0], "topic2")
+	testExpectMsg(t, cn[1], "topic2")
+	cn[1].Send(context.TODO(), irc.TOPIC, "#chan")
+	testExpectMsg(t, cn[1], "topic2")
+}
+
+func TestKick(t *testing.T) {
+	s := newIRCServer(t)
+	defer s.Close()
+
+	var cn [5]*Conn
+	for i := range cn {
+		cn[i] = s.client(t, fmt.Sprintf("n%d", i))
+		defer cn[i].Close()
+		cn[i].Send(context.TODO(), irc.JOIN, "#chan")
+		testExpectMsg(t, cn[i], "#chan")
+	}
+	cn[4].Send(context.TODO(), irc.PART, "#chan")
+	testExpectMsg(t, cn[4], irc.PART)
+
+	// try to kick when not an op
+	cn[1].Send(context.TODO(), irc.KICK, "#chan", "n2", "bye")
+	testExpectMsg(t, cn[1], irc.ERR_CHANOPRIVSNEEDED)
+
+	// try to kick a user that does not exist
+	cn[0].Send(context.TODO(), irc.KICK, "#chan", "nn", "bye")
+	testExpectMsg(t, cn[0], irc.ERR_USERNOTINCHANNEL)
+
+	// try to kick a user that does exist in channel
+	cn[0].Send(context.TODO(), irc.KICK, "#chan", "n4", "bye")
+	testExpectMsg(t, cn[0], irc.ERR_USERNOTINCHANNEL)
+
+	// try to kick multiple users
+	cn[0].Send(context.TODO(), irc.KICK, "#chan", "n1,n2", "bye")
+	testExpectMsg(t, cn[0], "bye")
+	testExpectMsg(t, cn[0], "bye")
+
+	// kicked user should receive kicked message
+	testExpectMsg(t, cn[1], "bye")
+	testExpectMsg(t, cn[2], "bye")
+	testExpectMsg(t, cn[2], "bye")
+	// non-kicked users should receive kicked message
+	testExpectMsg(t, cn[3], "bye")
+	testExpectMsg(t, cn[3], "bye")
+
+	// kicked user should not receive new channel messages
+	cn[0].Send(context.TODO(), irc.PRIVMSG, "#chan", "some message")
+	testutil.AssertTrue(t, expectSilence(cn[1]))
+	testutil.AssertTrue(t, expectSilence(cn[2]))
+	// non-kicked user should receive new channel messages
+	testExpectMsg(t, cn[3], "some message")
+}
+
 func TestOper(t *testing.T) {
 	s := newIRCServer(t)
 	defer s.Close()
@@ -362,7 +466,7 @@ func TestTopic(t *testing.T) {
 	defer cn.Close()
 	cn.Send(context.TODO(), "JOIN", "#mychan")
 	testExpectMsg(t, cn, "JOIN")
-	cn.Send(context.TODO(), "TOPIC", "#mychan", "some topic")
+	cn.Send(context.TODO(), irc.TOPIC, "#mychan", "some topic")
 	testExpectMsg(t, cn, "some topic")
 
 	cn2 := s.client(t, "n2")
@@ -370,7 +474,7 @@ func TestTopic(t *testing.T) {
 	cn2.Send(context.TODO(), "JOIN", "#mychan")
 	testExpectMsg(t, cn2, "some topic")
 
-	cn.Send(context.TODO(), "TOPIC", "#mychan", "topic2")
+	cn.Send(context.TODO(), irc.TOPIC, "#mychan", "topic2")
 	testExpectMsg(t, cn, "topic2")
 	testExpectMsg(t, cn2, "topic2")
 }
@@ -387,7 +491,7 @@ func TestList(t *testing.T) {
 	cn.Send(context.TODO(), "LIST")
 	testExpectMsg(t, cn, "#mychan")
 
-	cn.Send(context.TODO(), "TOPIC", "#mychan", "some topic")
+	cn.Send(context.TODO(), irc.TOPIC, "#mychan", "some topic")
 	testExpectMsg(t, cn, "some topic")
 
 	cn.Send(context.TODO(), "LIST")
@@ -516,7 +620,7 @@ func testPlaintext(t *testing.T, s *ircServer) map[string]string {
 
 	cn.Send(context.TODO(), "JOIN", "#mychan")
 	testExpectMsg(t, cn, "mychan")
-	cn.Send(context.TODO(), "TOPIC", "#mychan", "some topic")
+	cn.Send(context.TODO(), irc.TOPIC, "#mychan", "some topic")
 
 	cn2 := s.client(t, "secretuser2")
 	defer cn2.Close()

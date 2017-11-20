@@ -11,18 +11,41 @@ import (
 type ChannelCtl struct {
 	Name    string
 	Topic   string
-	Mode    string
+	Mode    ModeValue
 	Created time.Time
 }
 
-// ChannelNicks is one per server session; holds all nick data.
+// ChannelNick contains per-channel information for a nick.
+type ChannelNick struct {
+	Nick string
+	Mode ModeValue
+}
+
+// ChannelNicks is one per server session; holds all nick data for a channel.
 type ChannelNicks struct {
-	Nicks []string
+	Nicks []ChannelNick
+}
+
+func (cns *ChannelNicks) nicks() []string {
+	ret := make([]string, len(cns.Nicks))
+	for i, cn := range cns.Nicks {
+		ret[i] = cn.Nick
+	}
+	return ret
+}
+
+func (cns *ChannelNicks) find(nick string) *ChannelNick {
+	for i, cn := range cns.Nicks {
+		if cn.Nick == nick {
+			return &cns.Nicks[i]
+		}
+	}
+	return nil
 }
 
 func (cu *ChannelNicks) del(nick string) bool {
 	for i, u := range cu.Nicks {
-		if u == nick {
+		if u.Nick == nick {
 			cu.Nicks = append(cu.Nicks[:i], cu.Nicks[i+1:]...)
 			return true
 		}

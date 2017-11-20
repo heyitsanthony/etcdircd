@@ -11,6 +11,7 @@ import (
 
 	etcd "github.com/coreos/etcd/clientv3"
 	v3sync "github.com/coreos/etcd/clientv3/concurrency"
+	"github.com/coreos/etcd/mvcc/mvccpb"
 	"github.com/golang/glog"
 	"gopkg.in/sorcix/irc.v2"
 )
@@ -34,18 +35,19 @@ type etcdClient struct {
 }
 
 func newEtcdClient(s *Server, cn ConnIRC, cr *connectRequest) (*etcdClient, error) {
+	ss, err := s.ses.Session()
+	if err != nil {
+		return nil, err
+	}
 	uv := UserValue{
 		Nick:    cr.nick,
 		User:    cr.user,
 		Mode:    newModeValue(s.cfg.PinnedUserModes),
 		Created: time.Now(),
+		Lease:   int64(ss.Lease()),
 	}
 
 	ctx, cancel := context.WithTimeout(s.cli.Ctx(), 5*time.Second)
-	ss, err := s.ses.Session()
-	if err != nil {
-		return nil, err
-	}
 	opt := etcd.WithLease(ss.Lease())
 	resp, err := s.cli.Txn(ctx).If(
 		etcd.Compare(etcd.Version(keyUserCtl(uv.Nick)), "=", 0),
@@ -135,7 +137,7 @@ func (ec *etcdClient) monitorPart(ch string, usersc etcd.WatchChan) error {
 
 func (ec *etcdClient) sendParts(ch string, cns ChannelNicks, rev int64) error {
 	glog.V(9).Infof("sendLeaves: %q sending %+v", ch, cns)
-	users, err := ec.usersFromNicks(cns.Nicks, rev)
+	users, err := ec.usersFromNicks(cns.nicks(), rev)
 	if err != nil {
 		return err
 	}
@@ -180,8 +182,11 @@ func (ec *etcdClient) monitorMsg(msgc etcd.WatchChan) error {
 			if err := ec.SendMsg(ec.ctx, *msg); err != nil {
 				return err
 			}
-			if msg.Command == irc.PART && msg.Prefix.Name == ec.nick {
-				// remove watches on channel, should not receive more messages
+			switch {
+			case msg.Command == irc.PART && msg.Prefix.Name == ec.nick:
+				fallthrough
+			case msg.Command == irc.KICK && msg.Params[1] == ec.nick:
+				// Remove watches on channel; stop receiving messages.
 				ch := msg.Params[0]
 				ec.mu.Lock()
 				if f := ec.chCancel[ch]; f != nil {
@@ -255,9 +260,8 @@ func (ec *etcdClient) join(ch string) error {
 		stm.Put(userCtl, encodeUserValue(*uv), etcd.WithLease(lid))
 
 		// Create channel if it doesn't exist and fetch topic.
-		chctlv := stm.Get(chCtl)
 		var chv ChannelCtl
-		if len(chctlv) == 0 {
+		if chctlv := stm.Get(chCtl); len(chctlv) == 0 {
 			// channel does not exist
 			chv.Name = ch
 			chv.Created = time.Now()
@@ -273,15 +277,20 @@ func (ec *etcdClient) join(ch string) error {
 
 		// Add user to server's channel nick list.
 		var cns ChannelNicks
-		users := stm.Get(chNicks)
-		if len(users) > 0 {
-			cn, err := decodeChannelNicks(users)
+		cn := ChannelNick{Nick: uv.Nick}
+		if users := stm.Get(chNicks); len(users) > 0 {
+			v, err := decodeChannelNicks(users)
 			if err != nil {
 				return err
 			}
-			cns = *cn
+			cns = *v
 		}
-		cns.Nicks = append(cns.Nicks, uv.Nick)
+		if stm.Rev(chCtl) == 0 {
+			// First user has ops and owner status.
+			cn.Mode = cn.Mode.add('O')
+			cn.Mode = cn.Mode.add('o')
+		}
+		cns.Nicks = append(cns.Nicks, cn)
 		stm.Put(chNicks, encodeChannelNicks(cns), etcd.WithLease(lid))
 
 		// Broadcast the join to the channel members.
@@ -292,8 +301,6 @@ func (ec *etcdClient) join(ch string) error {
 	if err != nil {
 		return err
 	}
-
-	// TODO: if only nick, make channel operator
 
 	// JOIN is successful; the user receives a JOIN message as confirmation.
 	ec.SendMsg(ec.ctx, msg)
@@ -347,12 +354,41 @@ func (ec *etcdClient) names(ch string, rev int64) error {
 	if err != nil {
 		return err
 	}
+	modeMap, err := ec.nameModes(ch, rev)
+	if err != nil {
+		return err
+	}
 	nicks := make([]string, len(users))
 	for i, u := range users {
-		nicks[i] = u.Nick
+		nicks[i] = modeMap[u.Nick] + u.Nick
 	}
 	ec.sendHostMsg(irc.RPL_NAMREPLY, "=", ch, strings.Join(nicks, " "))
 	return ec.sendHostMsg(irc.RPL_ENDOFNAMES, ch, "End of NAMES list")
+}
+
+func (ec *etcdClient) nameModes(ch string, rev int64) (map[string]string, error) {
+	modeMap := make(map[string]string)
+	resp, err := ec.s.cli.Get(ec.ctx, keyChanNicksPfx(ch), etcd.WithPrefix())
+	if err != nil {
+		return nil, err
+	}
+	for _, kv := range resp.Kvs {
+		cns, err := decodeChannelNicks(string(kv.Value))
+		if err != nil {
+			return nil, err
+		}
+		for _, cn := range cns.Nicks {
+			switch {
+			case cn.Mode.has('o'):
+				modeMap[cn.Nick] = "@"
+			case cn.Mode.has('v'):
+				modeMap[cn.Nick] = "+"
+			default:
+				modeMap[cn.Nick] = ""
+			}
+		}
+	}
+	return modeMap, nil
 }
 
 func (ec *etcdClient) Who(args []string) error {
@@ -368,13 +404,21 @@ func (ec *etcdClient) Who(args []string) error {
 	if err != nil {
 		return err
 	}
+
+	modeMap := make(map[string]string)
+	if isChan(mask) {
+		if modeMap, err = ec.nameModes(mask, 0); err != nil {
+			return err
+		}
+	}
 	for _, u := range users {
-		v := fmt.Sprintf("%s %s %s %s %s H",
-			"*",
+		v := fmt.Sprintf("%s %s %s %s %s H%s",
+			mask,
 			u.User[1],
 			u.Host,
 			u.ServerName,
-			u.Nick)
+			u.Nick,
+			modeMap[u.Nick])
 		if err := ec.sendHostMsg(irc.RPL_WHOREPLY, v, "0 "+u.RealName); err != nil {
 			return err
 		}
@@ -431,40 +475,90 @@ func (ec *etcdClient) Quit(msg string) error {
 
 func (ec *etcdClient) Mode(m []string) error {
 	if isChan(m[0]) {
-		return ec.sendHostMsg(irc.ERR_NOCHANMODES, m[0], "Channel doesn't support modes")
+		return ec.chanMode(m[0], m[1:])
 	}
 	if m[0] != ec.nick {
 		return ec.sendHostMsg(irc.ERR_USERSDONTMATCH, "Cannot change mode for other users")
 	}
+	return ec.userMode(m[1:])
+}
 
-	mode := ""
-	bad := []byte{}
+func (ec *etcdClient) chanMode(ch string, m []string) error {
+	lid := ec.s.ses.s.Lease()
+	chCtl, nicksKey := keyChanCtl(ch), keyChanNicks(ch, int64(lid))
+	mode, noChan, notOnChan, notOp := "", false, false, false
+	f := func(stm v3sync.STM) error {
+		cv := stm.Get(chCtl)
+		if noChan = len(cv) == 0; noChan {
+			return nil
+		}
+		cctl, err := decodeChannelCtl(cv)
+		if err != nil {
+			return err
+		}
+		nicks, err := decodeChannelNicks(stm.Get(nicksKey))
+		if err != nil {
+			return err
+		}
+		n := nicks.find(ec.nick)
+		if notOnChan = n == nil; notOnChan {
+			return nil
+		}
+		updated := false
+		if len(m) > 0 {
+			if notOp = !n.Mode.has('o'); notOp {
+				return nil
+			}
+			cctl.Mode, _, updated = cctl.Mode.updateSlice(m, chanModePerms)
+		}
+		mode = string(cctl.Mode)
+		if !updated {
+			return nil
+		}
+		stm.Put(chCtl, encodeChannelCtl(*cctl))
+		return nil
+	}
+	if _, err := ec.doSTM(f, chCtl, nicksKey); err != nil {
+		return err
+	}
+	switch {
+	case noChan:
+		return ec.sendHostMsg(irc.ERR_NOCHANMODES, ch, "Channel doesn't support modes")
+	case notOnChan:
+		return ec.sendHostMsg(irc.ERR_NOTONCHANNEL, ch, "You're not on that channel")
+	case notOp:
+		return ec.sendHostMsg(irc.ERR_CHANOPRIVSNEEDED, ch, "You're not channel operator")
+	}
+	return ec.SendMsg(
+		ec.ctx,
+		irc.Message{
+			Prefix:  &ec.s.hostPfx,
+			Command: irc.MODE,
+			Params:  []string{ch, mode},
+		})
+}
 
+func (ec *etcdClient) userMode(m []string) error {
+	mode, bad := "", []byte{}
 	userCtl := keyUserCtl(ec.nick)
 	f := func(stm v3sync.STM) error {
 		uv, err := decodeUserValue(stm.Get(userCtl))
 		if err != nil {
 			return err
 		}
-		oldMode := uv.Mode
-		for _, modeStr := range m[1:] {
-			newMv, newBad := uv.Mode.update(modeStr)
-			uv.Mode = newMv
-			bad = append(bad, newBad...)
-		}
-		uv.Mode, _ = uv.Mode.update("+" + ec.s.cfg.PinnedUserModes)
+		updated := false
+		uv.Mode, bad, updated = uv.Mode.updateSlice(m, userModePerms)
 		mode = string(uv.Mode)
-		if uv.Mode.Equal(oldMode) {
+		if !updated {
 			return nil
 		}
-
 		stm.Put(userCtl, encodeUserValue(*uv), etcd.WithIgnoreLease())
 		return nil
 	}
 	if _, err := ec.doSTM(f, userCtl); err != nil {
 		return err
 	}
-	if len(m) == 1 {
+	if len(m) == 0 {
 		return ec.sendHostMsg(irc.RPL_UMODEIS, mode)
 	}
 	if err := ec.sendHostMsg(irc.MODE, mode); err != nil {
@@ -494,6 +588,13 @@ func (ec *etcdClient) Ping(msg string) error {
 }
 
 func (ec *etcdClient) PrivMsg(target, msg string) error {
+	if isChan(target) {
+		return ec.privMsgChan(target, msg)
+	}
+	return ec.privMsgUser(target, msg)
+}
+
+func (ec *etcdClient) privMsgUser(target, msg string) error {
 	v := encodeMessage(irc.Message{
 		Prefix:  &ec.prefix,
 		Command: irc.PRIVMSG,
@@ -501,12 +602,7 @@ func (ec *etcdClient) PrivMsg(target, msg string) error {
 	})
 	isOtrMsg := strings.HasPrefix(msg, "?OTR")
 
-	keyCtl, keyMsg := "", ""
-	if isChan(target) {
-		keyCtl, keyMsg = keyChanCtl(target), keyChanMsg(target)
-	} else {
-		keyCtl, keyMsg = keyUserCtl(target), keyUserMsg(target)
-	}
+	keyCtl, keyMsg := keyUserCtl(target), keyUserMsg(target)
 	myUserCtl := keyUserCtl(ec.nick)
 
 	noNick, badOtr := false, false
@@ -514,26 +610,24 @@ func (ec *etcdClient) PrivMsg(target, msg string) error {
 		if noNick = stm.Rev(keyCtl) == 0; noNick {
 			return nil
 		}
-		uvTarget, terr := decodeUserValue(stm.Get(keyCtl))
-		if !isChan(target) {
-			if terr != nil {
-				return terr
-			}
-			if uvTarget.Mode.has('a') {
-				awayMsg := encodeMessage(irc.Message{
-					Prefix:  &ec.prefix,
-					Command: irc.RPL_AWAY,
-					Params:  []string{ec.nick, target, uvTarget.AwayMsg},
-				})
-				stm.Put(keyUserMsg(ec.nick), awayMsg, etcd.WithIgnoreLease())
-				return nil
-			}
+		uv, err := decodeUserValue(stm.Get(myUserCtl))
+		if err != nil {
+			return err
 		}
-		if !isOtrMsg && !isChan(target) {
-			uv, err := decodeUserValue(stm.Get(myUserCtl))
-			if err != nil {
-				return err
-			}
+		uvTarget, err := decodeUserValue(stm.Get(keyCtl))
+		if err != nil {
+			return err
+		}
+		if uvTarget.Mode.has('a') {
+			awayMsg := encodeMessage(irc.Message{
+				Prefix:  &ec.prefix,
+				Command: irc.RPL_AWAY,
+				Params:  []string{ec.nick, target, uvTarget.AwayMsg},
+			})
+			stm.Put(keyUserMsg(ec.nick), awayMsg, etcd.WithIgnoreLease())
+			return nil
+		}
+		if !isOtrMsg {
 			if badOtr = uv.Mode.has('E'); badOtr {
 				// Tried to send non-OTR message to another user.
 				return nil
@@ -562,6 +656,57 @@ func (ec *etcdClient) PrivMsg(target, msg string) error {
 			irc.ERR_NOTEXTTOSEND,
 			target,
 			"No text to send")
+	}
+	return nil
+}
+
+func (ec *etcdClient) privMsgChan(ch, msg string) error {
+	v := encodeMessage(irc.Message{
+		Prefix:  &ec.prefix,
+		Command: irc.PRIVMSG,
+		Params:  []string{ch, msg},
+	})
+
+	keyCtl, keyMsg := keyChanCtl(ch), keyChanMsg(ch)
+	myUserCtl := keyUserCtl(ec.nick)
+
+	noNick, noSend := false, false
+	f := func(stm v3sync.STM) error {
+		if noNick = stm.Rev(keyCtl) == 0; noNick {
+			return nil
+		}
+		uv, err := decodeUserValue(stm.Get(myUserCtl))
+		if err != nil {
+			return err
+		}
+		chCtl, err := decodeChannelCtl(stm.Get(keyCtl))
+		if err != nil {
+			return err
+		}
+		if chCtl.Mode.has('m') {
+			cns, err := decodeChannelNicks(stm.Get(keyChanNicks(ch, uv.Lease)))
+			if err != nil {
+				return err
+			}
+			n := cns.find(ec.nick)
+			if noNick = n == nil; noNick {
+				return nil
+			}
+			if noSend = !n.Mode.has('o') && !n.Mode.has('O') && !n.Mode.has('v'); noSend {
+				return nil
+			}
+		}
+		stm.Put(keyMsg, v, etcd.WithIgnoreLease())
+		return nil
+	}
+	if _, err := ec.doSTM(f, keyCtl, myUserCtl); err != nil {
+		return err
+	}
+	switch {
+	case noNick:
+		return ec.sendHostMsg(irc.ERR_NOSUCHNICK, ch, "No such nick/channel")
+	case noSend:
+		return ec.sendHostMsg(irc.ERR_CANNOTSENDTOCHAN, ch, "Cannot send to channel")
 	}
 	return nil
 }
@@ -620,6 +765,85 @@ func (ec *etcdClient) Die() error {
 	return nil
 }
 
+func (ec *etcdClient) Kick(ch string, nicks []string, msg string) error {
+	for _, n := range nicks {
+		if err := ec.kick(ch, n, msg); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (ec *etcdClient) kick(ch string, nick string, msg string) error {
+	msgVal := encodeMessage(irc.Message{
+		Prefix:  &ec.prefix,
+		Command: irc.KICK,
+		Params:  []string{ch, nick, msg},
+	})
+	ss, serr := ec.s.ses.Session()
+	if serr != nil {
+		return serr
+	}
+	targetUserKey := keyUserCtl(nick)
+	myNicksKey := keyChanNicks(ch, int64(ss.Lease()))
+	notOp, notOnChan, userNotOnChan := false, false, false
+
+	f := func(stm v3sync.STM) error {
+		if notOnChan = stm.Rev(myNicksKey) == 0; notOnChan {
+			return nil
+		}
+		cns, err := decodeChannelNicks(stm.Get(myNicksKey))
+		if err != nil {
+			return err
+		}
+		n := cns.find(ec.nick)
+		if notOnChan = n == nil; notOnChan {
+			return nil
+		}
+		if notOp = !n.Mode.has('o') && !n.Mode.has('O'); notOp {
+			return nil
+		}
+
+		// Remove channel from user
+		if userNotOnChan = stm.Rev(targetUserKey) == 0; userNotOnChan {
+			return nil
+		}
+		uv, err := decodeUserValue(stm.Get(targetUserKey))
+		if err != nil {
+			return err
+		}
+		if userNotOnChan = !uv.part(ch); userNotOnChan {
+			return nil
+		}
+		stm.Put(targetUserKey, encodeUserValue(*uv), etcd.WithIgnoreLease())
+
+		// Remove user from channel
+		cnKey := keyChanNicks(ch, uv.Lease)
+		cn, err := decodeChannelNicks(stm.Get(cnKey))
+		if err != nil {
+			return err
+		}
+		cn.del(nick)
+		stm.Put(cnKey, encodeChannelNicks(*cn), etcd.WithIgnoreLease())
+
+		// Broadcast the kicks to the channel members.
+		stm.Put(keyChanMsg(ch), msgVal)
+		return nil
+	}
+	if _, err := ec.doSTM(f, targetUserKey, myNicksKey); err != nil {
+		return err
+	}
+	switch {
+	case notOnChan:
+		return ec.sendHostMsg(irc.ERR_NOTONCHANNEL, ch, "You're not on that channel")
+	case userNotOnChan:
+		return ec.sendHostMsg(irc.ERR_USERNOTINCHANNEL, nick, ch, "User not in channel")
+	case notOp:
+		return ec.sendHostMsg(irc.ERR_CHANOPRIVSNEEDED, ch, "You're not channel operator")
+	}
+	return nil
+}
+
 func (ec *etcdClient) Nick(n string) error { panic("STUB") }
 
 type replyList struct {
@@ -631,39 +855,42 @@ type replyList struct {
 func (ec *etcdClient) List(chs []string) error {
 	repls := []replyList{}
 
-	// TODO fetch visible user counts instead of faking it
-
+	ops := make([]etcd.Op, 1)
+	ops[0] = etcd.OpGet(keyUserCtl(ec.nick))
 	if len(chs) == 0 {
 		// fetch all channels
-		resp, err := ec.s.cli.Get(ec.ctx, keyChanCtl(""), etcd.WithPrefix())
-		if err != nil {
-			return err
+		ops = append(ops, etcd.OpGet(keyChanCtl(""), etcd.WithPrefix()))
+	} else {
+		// fetch some channels
+		for _, ch := range chs {
+			ops = append(ops, etcd.OpGet(keyChanCtl(ch)))
 		}
-		for _, kv := range resp.Kvs {
+	}
+	resp, err := ec.s.cli.Txn(ec.ctx).Then(ops...).Commit()
+	if err != nil {
+		return err
+	}
+	uvKv := resp.Responses[0].GetResponseRange().Kvs
+	if len(uvKv) == 0 {
+		return err
+	}
+	uv, err := decodeUserValue(string(uvKv[0].Value))
+	if err != nil {
+		return err
+	}
+	for _, kvResp := range resp.Responses[1:] {
+		for _, kv := range kvResp.GetResponseRange().Kvs {
 			chctl, err := decodeChannelCtl(string(kv.Value))
 			if err != nil {
 				return err
 			}
-			repls = append(repls, replyList{chctl.Name, 100, chctl.Topic})
-		}
-	} else {
-		// fetch some channels
-		for _, ch := range chs {
-			resp, err := ec.s.cli.Get(ec.ctx, keyChanCtl(ch), etcd.WithPrefix())
-			if err != nil {
-				return err
-			}
-			if len(resp.Kvs) == 0 {
+			if chctl.Mode.has('s') && !uv.inChan(chctl.Name) {
+				// Hide +s channels that client hasn't joined.
 				continue
-			}
-			chctl, err := decodeChannelCtl(string(resp.Kvs[0].Value))
-			if err != nil {
-				return err
 			}
 			repls = append(repls, replyList{chctl.Name, 100, chctl.Topic})
 		}
 	}
-
 	// do not send if no channels
 	for _, repl := range repls {
 		// "<channel> <# visible> :<topic>"
@@ -703,14 +930,7 @@ func (ec *etcdClient) Part(ch, msg string) error {
 		if err != nil {
 			return err
 		}
-		for i, uvch := range uv.Channels {
-			if uvch == ch {
-				uv.Channels = append(uv.Channels[:i], uv.Channels[i+1:]...)
-				onChannel = true
-				break
-			}
-		}
-		if !onChannel {
+		if onChannel = uv.part(ch); !onChannel {
 			return nil
 		}
 		stm.Put(userCtl, encodeUserValue(*uv), etcd.WithIgnoreLease())
@@ -773,33 +993,70 @@ func (ec *etcdClient) Close() error {
 	return nil
 }
 
-func (ec *etcdClient) Topic(ch, msg string) error {
-	msgVal := encodeMessage(irc.Message{
-		Prefix:  &ec.prefix,
-		Command: irc.TOPIC,
-		Params:  []string{ch, msg},
-	})
+func (ec *etcdClient) Topic(ch string, msg *string) error {
 	chCtl, chMsg := keyChanCtl(ch), keyChanMsg(ch)
+	ss, err := ec.s.ses.Session()
+	if err != nil {
+		return err
+	}
+	lid := int64(ss.Lease())
+	topic, noChan, notOnChan, notOp := "", false, false, false
+
 	f := func(stm v3sync.STM) error {
-		// Create channel if it doesn't exist and fetch topic.
 		chctlv := stm.Get(chCtl)
-		if len(chctlv) == 0 {
-			// TODO: send no such channel
+		if noChan = len(chctlv) == 0; noChan {
 			return nil
 		}
 		chv, err := decodeChannelCtl(chctlv)
 		if err != nil {
 			return err
 		}
-		chv.Topic = msg
+		if msg == nil {
+			topic = chv.Topic
+			return nil
+		}
+		if chv.Mode.has('t') {
+			cns, err := decodeChannelNicks(stm.Get(keyChanNicks(ch, lid)))
+			if err != nil {
+				return err
+			}
+			n := cns.find(ec.nick)
+			if notOnChan = n == nil; notOnChan {
+				return nil
+			}
+			if notOp = !n.Mode.has('o') && !n.Mode.has('O'); notOp {
+				return nil
+			}
+		}
+
+		chv.Topic = *msg
 		stm.Put(chCtl, encodeChannelCtl(*chv))
 
 		// Broadcast the topic update to the channel members.
+		msgVal := encodeMessage(irc.Message{
+			Prefix:  &ec.prefix,
+			Command: irc.TOPIC,
+			Params:  []string{ch, *msg},
+		})
 		stm.Put(chMsg, msgVal)
 		return nil
 	}
-	_, err := ec.doSTM(f, chCtl)
-	return err
+	if _, err := ec.doSTM(f, chCtl); err != nil {
+		return err
+	}
+	switch {
+	case noChan:
+		return ec.sendHostMsg(irc.ERR_NOCHANMODES, ch, "Channel doesn't support modes")
+	case notOnChan:
+		return ec.sendHostMsg(irc.ERR_NOTONCHANNEL, ch, "You're not on that channel")
+	case notOp:
+		return ec.sendHostMsg(irc.ERR_CHANOPRIVSNEEDED, ch, "You're not channel operator")
+	}
+	if msg == nil {
+		return ec.sendHostMsg(irc.TOPIC, ch, topic)
+	}
+
+	return nil
 }
 
 func (ec *etcdClient) Away(msg string) error {
@@ -875,25 +1132,37 @@ func (ec *etcdClient) usersFromChannel(ch string, rev int64) ([]UserValue, error
 		if err != nil {
 			return nil, err
 		}
-		nicks = append(nicks, n.Nicks...)
+		nicks = append(nicks, n.nicks()...)
 	}
 	return ec.usersFromNicks(nicks, resp.Header.Revision)
 }
 
-func (ec *etcdClient) usersFromNicks(nicks []string, rev int64) ([]UserValue, error) {
-	ops := make([]etcd.Op, len(nicks)+1)
+func (ec *etcdClient) userKeysFromNicks(nicks []string, rev int64) ([]*mvccpb.KeyValue, error) {
+	ops := make([]etcd.Op, len(nicks))
 	for i, n := range nicks {
 		ops[i] = etcd.OpGet(keyUserCtl(n), etcd.WithRev(rev))
 	}
-	ops[len(ops)-1] = etcd.OpGet(keyUserCtl(ec.nick), etcd.WithRev(rev))
-
 	resp, err := ec.s.cli.Txn(ec.ctx).Then(ops...).Commit()
 	if err != nil {
 		return nil, err
 	}
+	ret := make([]*mvccpb.KeyValue, len(nicks))
+	for i, r := range resp.Responses {
+		if len(r.GetResponseRange().Kvs) > 0 {
+			ret[i] = r.GetResponseRange().Kvs[0]
+		}
+	}
+	return ret, nil
+}
+
+func (ec *etcdClient) usersFromNicks(nicks []string, rev int64) ([]UserValue, error) {
+	kvs, err := ec.userKeysFromNicks(append(nicks, ec.nick), rev)
+	if err != nil {
+		return nil, err
+	}
 	users := []UserValue{}
-	for _, r := range resp.Responses {
-		uv, err := decodeUserValue(string(r.GetResponseRange().Kvs[0].Value))
+	for _, kv := range kvs {
+		uv, err := decodeUserValue(string(kv.Value))
 		if err != nil {
 			return nil, err
 		}
