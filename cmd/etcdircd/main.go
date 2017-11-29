@@ -67,6 +67,9 @@ func main() {
 		}
 		ln = tls.NewListener(ln, tlscfg)
 	}
+	if len(ircCfg.IrcdDebugTeeDir) != 0 {
+		ln = util.TeeListener(ln, ircCfg.IrcdDebugTeeDir)
+	}
 
 	cli := util.MustEtcdClient(*etcdYaml)
 	defer cli.Close()

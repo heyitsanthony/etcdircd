@@ -22,6 +22,9 @@ type IrcCfg struct {
 	IrcdCAFile   string
 
 	IrcdClientCerts bool
+
+	// IrcdDebugTeeDir is the directory to write incoming client data.
+	IrcdDebugTeeDir string
 }
 
 func NewIrcCfgFromFile(f string) (*IrcCfg, error) {
